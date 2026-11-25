@@ -1,0 +1,35 @@
+# Arb Scanner v3 + Optional Hummingbot Base Stack
+# Quick start on any local Docker host or remote Linux VPS:
+#   docker compose up -d --build
+# Then open http://127.0.0.1:3001 (or SSH port-forward: ssh -L 3001:127.0.0.1:3001 user@vps)
+services:
+  arb-scanner:
+    build: .
+    container_name: arb_scanner_v3
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:3001:3001"
+    environment:
+      - PORT=3001
+      - BIND_HOST=0.0.0.0
+      - ARB_CONFIG=/app/server/data/config.json
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ${HUMMINGBOT_DIR:-./hummingbot}:/root/hummingbot
+      - ./server/data:/app/server/data
+
+  hummingbot-base:
+    image: ${HB_IMAGE:-hummingbot/hummingbot:version-2.14.0}
+    container_name: hb_base
+    profiles: ["base"]
+    stdin_open: true
+    tty: true
+    restart: unless-stopped
+    mem_limit: 768m
+    cpus: 1.0
+    environment:
+      - CONFIG_PASSWORD=${HB_PASSWORD:-1313}
+    volumes:
+      - ${HUMMINGBOT_DIR:-./hummingbot}/conf:/home/hummingbot/conf
+      - ${HUMMINGBOT_DIR:-./hummingbot}/logs:/home/hummingbot/logs
+      - ${HUMMINGBOT_DIR:-./hummingbot}/data:/home/hummingbot/data

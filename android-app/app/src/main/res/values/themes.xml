@@ -1,0 +1,7 @@
+<resources>
+    <style name="Theme.ArbScanner" parent="android:Theme.Material.NoActionBar">
+        <item name="android:statusBarColor">@color/arb_bg</item>
+        <item name="android:navigationBarColor">@color/arb_bg</item>
+        <item name="android:windowBackground">@color/arb_bg</item>
+    </style>
+</resources>

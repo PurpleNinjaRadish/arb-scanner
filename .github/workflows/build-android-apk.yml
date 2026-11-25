@@ -1,0 +1,78 @@
+name: Build Android APK
+
+on:
+  workflow_dispatch:
+    inputs:
+      publish_release:
+        description: "Publish direct-download .apk to GitHub Releases (easiest for phone install)"
+        type: boolean
+        default: true
+  push:
+    branches: [main, master]
+    paths:
+      - "android-app/**"
+      - ".github/workflows/build-android-apk.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  build-apk:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK & accept licenses
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android 35 platform & build tools
+        run: |
+          yes | sdkmanager --licenses >/dev/null 2>&1 || true
+          sdkmanager "platforms;android-35" "build-tools;35.0.0"
+
+      - name: Set up Gradle 8.9
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.9"
+
+      - name: Build Debug APK
+        working-directory: android-app
+        run: gradle assembleDebug --no-daemon --stacktrace
+
+      - name: Prepare APK artifact
+        run: |
+          mkdir -p dist
+          cp android-app/app/build/outputs/apk/debug/app-debug.apk dist/arb-scanner-v3-debug.apk
+          sha256sum dist/arb-scanner-v3-debug.apk > dist/arb-scanner-v3-debug.apk.sha256
+          ls -lh dist/
+
+      - name: Upload APK as Workflow Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: arb-scanner-v3-android-apk
+          path: |
+            dist/arb-scanner-v3-debug.apk
+            dist/arb-scanner-v3-debug.apk.sha256
+          retention-days: 30
+
+      - name: Publish Direct-Download APK to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.publish_release) || github.event_name == 'push'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || 'android-latest' }}
+          name: ${{ startsWith(github.ref, 'refs/tags/') && format('Arb Scanner {0}', github.ref_name) || 'Arb Scanner v3 Android APK (Latest)' }}
+          body: |
+            Direct-download Android APK built automatically by GitHub Actions.
+            - Tap **arb-scanner-v3-debug.apk** below on your Android phone to download & install.
+            - Pair with your PC/VPS backend in the app's **Connect** tab using the 1-tap Pairing JSON from desktop **Alerts & Mobile**.
+          prerelease: ${{ !startsWith(github.ref, 'refs/tags/') }}
+          files: |
+            dist/arb-scanner-v3-debug.apk
+            dist/arb-scanner-v3-debug.apk.sha256
