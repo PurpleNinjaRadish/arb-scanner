@@ -67,6 +67,13 @@ Every bot launch (web Deploy dialog, Hummingbot "Save & Restart", Android quick 
 - **Blocked bots need manual confirmation**: tick the confirmation box; live bots also require typing `COIN-QUOTE LIVE`. Every decision and override is logged. Phone deploys can't override; confirm on the desktop.
 - **Live guard rails** (can't be overridden; change them in settings): max order size, minimum profitability floor, Hummingbot kill-switch stop-loss written to `conf_client.yml` (2.x `kill_switch_mode` format), and a backend monitor that stops a live bot and pushes an alert when its realized loss reaches the $ limit. The monitor uses realized (matched buy/sell) P&L; the kill switch covers overall return, including inventory.
 
+## Auto-Trade (🤖 panel at the top of the Scanner tab)
+When the Target Watcher finds a target, the auto-trader launches a bot for it, but only if it passes **every** check with no manual override: ticker audit, price cross-check, per-trade and monthly profitability, and the live guard rails in live mode. Failed targets are skipped and logged with the reason.
+
+- **Paper by default.** Switching to live (real funds) means typing `LIVE AUTO-TRADE`. It's refused while the API is open to your network without an API token, and a live launch is skipped if Hummingbot has no API keys for either exchange.
+- **Its own limits:** max order size, bot min profitability, max bots at once, max launches per 24 h, same-coin cooldown, and a max run time after which each auto bot is stopped.
+- Turning auto-trade on also turns on the Target Watcher (pair, quote and thresholds are set in 🔔 Alerts). Each launch sends a push notification.
+
 ## Ticker Audit (🔤 Ticker Audit tab)
 Exchanges don't always agree on tickers. The same coin can have different tickers (Kraken `XBT` = `BTC`; OKX/KuCoin `LIT` = Lighter = `LIGHTER` on Kraken/Coinbase), and different coins can share one (Kraken `ONE` is not Harmony `ONE`). The scanner maps every listing to one canonical ticker (`server/lib/tickers.js`), then audits all USD/USDC/USDT markets on every reachable exchange every 30 minutes. Any listing more than 20% off the other exchanges' median price is excluded from the scanner, alerts and bot launches. Hummingbot strategies get each exchange's own market name automatically. The tab lists every coin per exchange, shows what was flagged and why, and exports CSV.
 

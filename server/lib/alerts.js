@@ -264,6 +264,12 @@ class AlertManager {
         triggered.push(alert);
       }
 
+      // Auto-trader: launch a bot for a target only if it passes every safety check
+      if (triggered.length) {
+        const { autoTrader } = require('./autoTrader');
+        autoTrader.onTargets(triggered).catch(e => console.error('auto-trader:', e.message));
+      }
+
       return { checked: scan.opportunities.length, triggeredCount: triggered.length, triggered };
     } catch (e) {
       this.lastError = e.message;

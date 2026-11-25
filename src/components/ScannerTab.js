@@ -3,6 +3,7 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import { api } from '../api';
 import { EXCHANGES, EXCHANGE_PAIRS, QUOTES, COIN_GROUPS, TRADE_SIZES, fmtPrice, fmtUsd, fmtVol } from '../constants';
 import { C, S, Badge, MetricCard, ExBadge, PriceTick, Notice, Modal } from '../ui';
+import AutoTradePanel from './AutoTradePanel';
 
 const SORT_OPTS = [
   { k: 'netProfit', l: 'Net %' },
@@ -96,6 +97,7 @@ function VerifyFillModal({ opp, pair, quote, feeMode, onClose }) {
 }
 
 export default function ScannerTab({
+  hosts = [],
   activePairId, setActivePairId, quote, setQuote,
   tradeSize, setTradeSize, onDeploy, onProject,
 }) {
@@ -179,6 +181,7 @@ export default function ScannerTab({
 
   return (
     <div>
+      <AutoTradePanel hosts={hosts} />
       {verifyOpp && (
         <VerifyFillModal opp={verifyOpp} pair={activePair} quote={quote} feeMode={feeMode} onClose={() => setVerifyOpp(null)} />
       )}

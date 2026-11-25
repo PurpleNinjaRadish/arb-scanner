@@ -206,7 +206,7 @@ export default function App() {
           </div>
           <div style={{ display: 'flex', gap: 6 }}>
             <button className="tbtn" onClick={() => { setTab('alerts'); setToastAlert(null); }} style={S.btn(C.cyan)}>View Alerts</button>
-            {!toastAlert.isTest && toastAlert.kind !== 'guard' && (
+            {!toastAlert.isTest && !['guard', 'auto'].includes(toastAlert.kind) && (
               <button className="tbtn" onClick={() => { deployFromAlert(toastAlert); setToastAlert(null); }} style={S.btn(C.green, true)}>🤖 Deploy Bot</button>
             )}
           </div>
@@ -314,6 +314,7 @@ export default function App() {
         {/* Active Workspace */}
         {tab === 'scanner' && (
           <ScannerTab
+            hosts={hosts}
             activePairId={activePairId}
             setActivePairId={setActivePairId}
             quote={quote}

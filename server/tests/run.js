@@ -526,5 +526,121 @@ function invokeApp(method, urlPath, body) {
     tickerAudit._setCacheForTests(null);
   });
 
+  // ─── Auto-trader (Target Watcher → bot) ─────────────────────────────────────
+  await test('auto-trader: launches only when every check passes, never overrides, respects its limits', async () => {
+    const { autoTrader } = require('../lib/autoTrader');
+    const hbMod = require('../lib/hummingbot');
+    const saved = { deployStrategy: hbMod.deployStrategy, listContainers: hbMod.listContainers, containerAction: hbMod.containerAction, listConnectors: hbMod.listConnectors, ensureKillSwitch: hbMod.ensureKillSwitch, getTradesAndPnl: hbMod.getTradesAndPnl };
+    const savedGate = guard.gateDeploy;
+    const deployed = [], stopped = [];
+    let gateMode = 'pass';
+    hbMod.deployStrategy = async (target, o) => { deployed.push(o); return { success: true, containerId: 'c' + deployed.length, containerName: `arb_${o.configName}`, configName: o.configName }; };
+    hbMod.listContainers = async () => deployed.map(o => ({ name: `arb_${o.configName}`, state: 'running', strategyLabel: o.configName }));
+    hbMod.containerAction = async (t, name, action) => { stopped.push(`${name}:${action}`); return { success: true }; };
+    hbMod.listConnectors = async () => [{ exchange: 'kraken' }];
+    hbMod.ensureKillSwitch = async () => ({ changed: true, killSwitchRate: -3 });
+    hbMod.getTradesAndPnl = async () => ({ byPairLive: {} });
+    guard.gateDeploy = async (target, o) => {
+      const info = guard.describeStrategy(parseStrategyYaml(o.yaml));
+      if (gateMode === 'block') throw new guard.GateError('Blocked: not verified profitable.', 409, { blocked: true, reasons: ['Per-trade: Loses $1.20 per trade'] });
+      assert.strictEqual(o.override, undefined, 'auto launches never carry an override');
+      return { info, overridden: false, check: { allowed: true, perTrade: { netPct: 0.41 }, monthly: { monthlyNet: 22.5 } } };
+    };
+    const target = (symbol, extra = {}) => ({ id: 'al_' + symbol, isTest: false, symbol, quote: 'USD', pair: 'kraken_coinbase', buyOn: 'kraken', sellOn: 'coinbase', buyPrice: 100, sellPrice: 101.5, tradeSize: 1000, netProfitPct: 0.5, ...extra });
+    try {
+      // Off → nothing happens
+      assert.deepStrictEqual(await autoTrader.onTargets([target('SOL')]), []);
+
+      autoTrader.updateSettings({ enabled: true, maxConcurrent: 2, maxPerDay: 3, symbolCooldownMin: 60, maxRuntimeMin: 30, maxOrderUsd: 400 });
+      assert.strictEqual(guard.guardSettings && require('../lib/config').loadConfig().alerts.enabled, true, 'enabling auto-trade turns the Target Watcher on');
+
+      // Pass → paper bot launched, capped order size, registered for max runtime
+      let r = await autoTrader.onTargets([target('SOL')]);
+      assert.strictEqual(r[0].outcome, 'launched');
+      assert.strictEqual(deployed.length, 1);
+      assert.ok(/_paper_trade/.test(deployed[0].yaml), 'paper by default');
+      assert.strictEqual(r[0].tradeSizeUsd, 400, 'order size capped at maxOrderUsd');
+      const bot = guard.monitor.list().find(b => b.containerName === r[0].containerName);
+      assert.ok(bot && bot.auto && bot.live === false && bot.stopAt > Date.now());
+      const { alertManager } = require('../lib/alerts');
+      assert.ok(alertManager.list({ limit: 3 }).some(a => a.kind === 'auto' && /AUTO BOT \(PAPER\): SOL-USD/.test(a.title)));
+
+      // Same coin while running → skipped
+      r = await autoTrader.onTargets([target('SOL')]);
+      assert.strictEqual(r[0].outcome, 'skipped');
+      assert.ok(/already running/.test(r[0].reason));
+
+      // Failed safety checks → skipped, nothing deployed
+      gateMode = 'block';
+      r = await autoTrader.onTargets([target('ETH')]);
+      assert.strictEqual(r[0].outcome, 'skipped');
+      assert.ok(/Failed safety checks: Per-trade/.test(r[0].reason));
+      assert.strictEqual(deployed.length, 1);
+      gateMode = 'pass';
+
+      // Second coin launches; third hits the concurrent limit
+      r = await autoTrader.onTargets([target('ETH')]);
+      assert.strictEqual(r[0].outcome, 'launched');
+      r = await autoTrader.onTargets([target('ADA')]);
+      assert.ok(/max 2/.test(r[0].reason));
+
+      // Max runtime: monitor stops auto bots when their time is up
+      for (const b of guard.monitor.list().filter(b => b.auto)) { guard.monitor.bots[b.key].stopAt = Date.now() - 1000; }
+      guard.updateGuardSettings({ autoRecheckEnabled: false });
+      await guard.monitor.tick();
+      assert.strictEqual(stopped.length, 2);
+      assert.ok(guard.monitor.list().filter(b => b.auto).every(b => b.status === 'completed'));
+
+      // Cooldown blocks an immediate relaunch of the same coin
+      r = await autoTrader.onTargets([target('SOL')]);
+      assert.ok(/Cooldown/.test(r[0].reason));
+
+      // Daily cap (3): ADA launches (3rd), BTC is refused
+      r = await autoTrader.onTargets([target('ADA')]);
+      assert.strictEqual(r[0].outcome, 'launched');
+      for (const b of guard.monitor.list().filter(b => b.auto && b.status === 'active')) guard.monitor.bots[b.key].status = 'completed';
+      r = await autoTrader.onTargets([target('BTC')]);
+      assert.ok(/Daily limit/.test(r[0].reason));
+    } finally {
+      Object.assign(hbMod, saved);
+      guard.gateDeploy = savedGate;
+      for (const b of guard.monitor.list()) guard.monitor.remove(b.key);
+    }
+  });
+
+  await test('auto-trader: live needs typed confirmation, a token on LAN, and exchange keys', async () => {
+    const { autoTrader, LIVE_PHRASE } = require('../lib/autoTrader');
+    const hbMod = require('../lib/hummingbot');
+    const savedConn = hbMod.listConnectors;
+    const prevBind = process.env.BIND_HOST;
+    try {
+      assert.throws(() => autoTrader.updateSettings({ mode: 'live' }), /Type LIVE AUTO-TRADE/);
+      process.env.BIND_HOST = '0.0.0.0';
+      assert.throws(() => autoTrader.updateSettings({ mode: 'live', confirmPhrase: LIVE_PHRASE }), /without an API token/);
+      process.env.BIND_HOST = '127.0.0.1';
+      const st = autoTrader.updateSettings({ mode: 'live', confirmPhrase: 'live auto-trade' });
+      assert.strictEqual(st.mode, 'live');
+      assert.ok(autoTrader.status().log.some(e => e.outcome === 'mode_change' && e.mode === 'live'));
+
+      hbMod.listConnectors = async () => [{ exchange: 'kraken' }]; // no Coinbase keys
+      autoTrader.log = autoTrader.log.filter(e => e.outcome !== 'launched');
+      const r = await autoTrader.consider({ symbol: 'SOL', quote: 'USD', pair: 'kraken_coinbase', buyOn: 'kraken', sellOn: 'coinbase', buyPrice: 100, tradeSize: 500, netProfitPct: 0.5 }, autoTrader.status().settings);
+      assert.strictEqual(r.outcome, 'skipped');
+      assert.ok(/No Hummingbot API keys .* Coinbase/.test(r.reason));
+
+      assert.strictEqual(autoTrader.updateSettings({ mode: 'paper', enabled: false }).mode, 'paper', 'back to paper needs no confirmation');
+    } finally {
+      hbMod.listConnectors = savedConn;
+      if (prevBind === undefined) delete process.env.BIND_HOST; else process.env.BIND_HOST = prevBind;
+    }
+  });
+
+  await test('guard: an auto launch cannot use a manual override', async () => {
+    const pmm = 'strategy: pure_market_making\nexchange: kraken_paper_trade\nmarket: BTC-USD\norder_amount: 0.001\n';
+    await assert.rejects(guard.gateDeploy('local', { configName: 'auto_x', yaml: pmm, override: { confirmed: true }, auto: true }), e => e.status === 409);
+    const ok = await guard.gateDeploy('local', { configName: 'manual_x', yaml: pmm, override: { confirmed: true } });
+    assert.ok(ok.overridden, 'the same override works for a manual launch');
+  });
+
   console.log(`\nCompleted: ${passed} test(s) passed.\n`);
 })();

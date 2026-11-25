@@ -453,7 +453,8 @@ function liveGuardViolations(info, refPrice, g) {
 }
 
 // Returns { check, info, overridden } or throws GateError (409 = needs confirmation, 400 = hard rule)
-async function gateDeploy(target, { configName, yaml: yamlText, override } = {}) {
+async function gateDeploy(target, { configName, yaml: yamlText, override, auto = false } = {}) {
+  if (auto) override = undefined; // automatic launches must pass every check outright
   const cfg = loadConfig();
   const g = guardSettings(cfg);
   const parsed = parseStrategyYaml(yamlText);
@@ -477,7 +478,7 @@ async function gateDeploy(target, { configName, yaml: yamlText, override } = {})
   if (info.live) {
     const violations = liveGuardViolations(info, check && check.refPrice, g);
     if (violations.length) {
-      audit({ action: 'blocked_guard_rail', target, configName, pair: `${info.symbol}-${info.quote}`, live: true, reasons: violations });
+      audit({ action: auto ? 'auto_blocked_guard_rail' : 'blocked_guard_rail', target, configName, pair: `${info.symbol}-${info.quote}`, live: true, reasons: violations });
       throw new GateError(`Live guard rails: ${violations.join('; ')}`, 400, { guardViolations: violations, check });
     }
   }
@@ -488,7 +489,7 @@ async function gateDeploy(target, { configName, yaml: yamlText, override } = {})
     const ok = override && override.confirmed === true
       && (!info.live || String(override.phrase || '').trim().toUpperCase() === phrase.toUpperCase());
     if (!ok) {
-      audit({ action: 'blocked', target, configName, pair: `${info.symbol}-${info.quote}`, live: info.live, reasons });
+      audit({ action: auto ? 'auto_blocked' : 'blocked', target, configName, pair: `${info.symbol}-${info.quote}`, live: info.live, reasons });
       throw new GateError(
         `Blocked: not verified profitable. ${reasons.slice(0, 3).join(' | ')}`,
         409,
@@ -498,7 +499,7 @@ async function gateDeploy(target, { configName, yaml: yamlText, override } = {})
     overridden = true;
   }
   audit({
-    action: overridden ? 'override' : 'allowed', target, configName, pair: `${info.symbol}-${info.quote}`,
+    action: overridden ? 'override' : auto ? 'auto_allowed' : 'allowed', target, configName, pair: `${info.symbol}-${info.quote}`,
     live: info.live, reasons: overridden ? reasons : [],
     netPct: check ? check.perTrade.netPct ?? null : null, monthlyNet: check ? check.monthly.monthlyNet : null,
   });
@@ -518,22 +519,27 @@ class GuardMonitor {
   save() { writeJson(BOTS_FILE, this.bots); }
   list() { return Object.values(this.bots).sort((a, b) => b.registeredAt - a.registeredAt); }
 
-  async register({ target, containerName, configName, info }) {
+  async register({ target, containerName, configName, info, auto = false, maxRuntimeMin = null }) {
     const g = guardSettings();
+    const live = info.live !== false;
     let baselinePnl = 0;
-    try {
-      const hb = require('./hummingbot');
-      const pnl = await hb.getTradesAndPnl(target);
-      baselinePnl = (pnl.byPairLive[`${info.symbol}-${info.quote}`] || {}).netMatchedPnl || 0;
-    } catch (_) { /* no trade files yet */ }
+    if (live) {
+      try {
+        const hb = require('./hummingbot');
+        const pnl = await hb.getTradesAndPnl(target);
+        baselinePnl = (pnl.byPairLive[`${info.symbol}-${info.quote}`] || {}).netMatchedPnl || 0;
+      } catch (_) { /* no trade files yet */ }
+    }
     const key = `${target}:${containerName}`;
     this.bots[key] = {
       key, target, containerName, configName,
       pair: `${info.symbol}-${info.quote}`, symbol: info.symbol, quote: info.quote,
       exA: info.exA, exB: info.exB, strategy: info.strategy,
+      live, auto: !!auto,
       maxLossUsd: g.liveMaxLossUsd, stopLossPct: g.liveStopLossPct,
       baselinePnl, sessionPnl: 0, status: 'active',
       registeredAt: Date.now(), lastCheckAt: null, lastPriceAlertAt: 0, lastNote: '',
+      stopAt: auto && Number(maxRuntimeMin) > 0 ? Date.now() + Number(maxRuntimeMin) * 60000 : null,
     };
     this.save();
     this.sync();
@@ -578,6 +584,16 @@ class GuardMonitor {
           b.lastCheckAt = Date.now();
           const c = containers.find(x => x.name === b.containerName);
           if (!c || c.state !== 'running') { b.status = 'stopped'; b.lastNote = 'Container is no longer running'; continue; }
+
+          if (b.stopAt && Date.now() >= b.stopAt) {
+            try { await hb.containerAction(target, b.containerName, 'stop'); b.lastNote = 'Stopped: reached max runtime'; }
+            catch (e) { b.lastNote = `Max runtime reached but stop failed: ${e.message}`; }
+            b.status = 'completed';
+            b.completedAt = Date.now();
+            audit({ action: 'auto_stop', target, configName: b.configName, pair: b.pair, live: b.live !== false, reasons: ['Reached max runtime'] });
+            continue;
+          }
+          if (b.live === false) continue; // paper bots: runtime limit only
 
           const cur = pnl ? ((pnl.byPairLive[b.pair] || {}).netMatchedPnl || 0) : null;
           if (cur != null) b.sessionPnl = Number((cur - b.baselinePnl).toFixed(4));

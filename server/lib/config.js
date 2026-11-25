@@ -54,6 +54,20 @@ const DEFAULT_GUARD = {
   autoRecheckEnabled: true,     // re-run the price cross-check for running live bots
 };
 
+// Automatic bot launches for Target Watcher hits. Paper unless switched to live.
+const DEFAULT_AUTOTRADE = {
+  enabled: false,
+  mode: 'paper',              // 'paper' | 'live' (live needs typed confirmation)
+  target: 'local',            // host that runs the bots
+  strategy: 'amm_arb',        // 'amm_arb' | 'cross_exchange_market_making'
+  maxOrderUsd: 500,
+  minProfitabilityPct: 0.25,  // bot's own min_profitability (net, %)
+  maxConcurrent: 2,           // auto-launched bots running at once
+  maxPerDay: 6,               // auto launches in any 24 h
+  maxRuntimeMin: 60,          // auto bots are stopped after this long
+  symbolCooldownMin: 60,      // no re-launch on the same coin within this window
+};
+
 const DEFAULTS = {
   hbImage: 'hummingbot/hummingbot:version-2.14.0',
   hbPassword: '',
@@ -64,6 +78,7 @@ const DEFAULTS = {
   vpnDedicatedIp: '',
   alerts: DEFAULT_ALERTS,
   guard: DEFAULT_GUARD,
+  autoTrade: DEFAULT_AUTOTRADE,
   watchAccounts: [],
 };
 
@@ -75,6 +90,7 @@ function migrate(raw) {
   cfg.fees = { ...DEFAULT_FEES, ...(raw.fees || {}) };
   cfg.alerts = { ...DEFAULT_ALERTS, ...(raw.alerts || {}) };
   cfg.guard = { ...DEFAULT_GUARD, ...(raw.guard || {}) };
+  cfg.autoTrade = { ...DEFAULT_AUTOTRADE, ...(raw.autoTrade || {}) };
   if (!Array.isArray(cfg.servers)) cfg.servers = [];
   if (!Array.isArray(cfg.watchAccounts)) cfg.watchAccounts = [];
 
@@ -126,6 +142,7 @@ function publicConfig(cfg = loadConfig()) {
     fees: cfg.fees,
     vpnDedicatedIp: cfg.vpnDedicatedIp,
     guard: cfg.guard,
+    autoTrade: cfg.autoTrade,
     alerts: {
       ...a,
       telegramBotToken: '',
@@ -155,4 +172,4 @@ function validateServer(s) {
   return errors;
 }
 
-module.exports = { loadConfig, saveConfig, updateConfig, publicConfig, validateServer, DEFAULT_FEES, DEFAULT_ALERTS, DEFAULT_GUARD, CONFIG_PATH };
+module.exports = { loadConfig, saveConfig, updateConfig, publicConfig, validateServer, DEFAULT_FEES, DEFAULT_ALERTS, DEFAULT_GUARD, DEFAULT_AUTOTRADE, CONFIG_PATH };

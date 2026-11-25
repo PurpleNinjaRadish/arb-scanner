@@ -20,6 +20,8 @@ const { alertManager } = require('./lib/alerts');
 const portfolio = require('./lib/portfolio');
 const guard = require('./lib/guard');
 const tickerAudit = require('./lib/tickerAudit');
+const { guardedLaunch } = require('./lib/launcher');
+const { autoTrader } = require('./lib/autoTrader');
 
 const app = express();
 
@@ -266,33 +268,8 @@ app.get('/api/instances', wrap(async (req, res) => {
   res.json({ target, instances });
 }));
 
-// Every bot launch goes through the price cross-check + profitability gate.
-// Saving a YAML without starting it (autoStart: false) is not gated.
-async function guardedLaunch(target, { configName, yaml, override }, launch) {
-  const gate = await guard.gateDeploy(target, { configName, yaml, override });
-  let killSwitch = null;
-  if (gate.info.live) {
-    // Stop-loss must be in conf_client.yml before the container reads it at startup
-    killSwitch = await hb.ensureKillSwitch(target, guard.guardSettings().liveStopLossPct);
-  }
-  const result = await launch();
-  let monitored = null;
-  if (gate.info.live && result && result.containerName) {
-    monitored = await guard.monitor.register({ target, containerName: result.containerName, configName, info: gate.info }).catch(() => null);
-  }
-  return {
-    ...result,
-    guard: {
-      allowed: gate.check ? gate.check.allowed : false,
-      overridden: gate.overridden,
-      live: gate.info.live,
-      killSwitch,
-      monitored: !!monitored,
-      check: gate.check,
-    },
-  };
-}
-
+// Every bot launch goes through the price cross-check + profitability gate
+// (server/lib/launcher.js). Saving a YAML without starting it is not gated.
 app.post('/api/deploy', wrap(async (req, res) => {
   const { target = 'local', override, ...opts } = req.body || {};
   if (opts.autoStart === false) return res.json(await hb.deployStrategy(target, opts));
@@ -438,6 +415,14 @@ app.get('/api/tickers/audit', wrap(async (req, res) => {
   const a = await tickerAudit.runTickerAudit({ force: req.query.refresh === '1' });
   const full = req.query.full === '1';
   res.json(full ? a : { ...a, symbols: undefined });
+}));
+
+// ─── Auto-trader (Target Watcher → bot, paper by default) ────────────────────
+app.get('/api/autotrade', (req, res) => res.json(autoTrader.status()));
+
+app.post('/api/autotrade/settings', wrap(async (req, res) => {
+  autoTrader.updateSettings(req.body || {});
+  res.json(autoTrader.status());
 }));
 
 app.get('/api/crosscheck/history', (req, res) => res.json({ history: guard.history }));
