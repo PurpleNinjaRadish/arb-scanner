@@ -12,7 +12,7 @@ const { getOrderBook, vwapFill } = require('./exchanges');
 const { runScan } = require('./scanner');
 const { loadConfig } = require('./config');
 
-const DATA_DIR = path.join(__dirname, '..', 'data');
+const DATA_DIR = process.env.ARB_DATA_DIR || path.join(__dirname, '..', 'data');
 const STATE_FILE = path.join(DATA_DIR, 'paper_state.json');
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));

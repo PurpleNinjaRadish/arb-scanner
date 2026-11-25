@@ -18,6 +18,7 @@ const advisor = require('./lib/advisor');
 const provision = require('./lib/provision');
 const { alertManager } = require('./lib/alerts');
 const portfolio = require('./lib/portfolio');
+const guard = require('./lib/guard');
 
 const app = express();
 
@@ -54,7 +55,17 @@ app.use('/api', (req, res, next) => {
 
 // Helper to wrap async route handlers with clean status codes
 const wrap = (fn) => (req, res) => Promise.resolve(fn(req, res)).catch(err => {
-  const status = err instanceof HostError && err.status ? err.status : 500;
+  if (err instanceof guard.GateError) {
+    return res.status(err.status).json({
+      error: err.message,
+      blocked: !!err.blocked,
+      reasons: err.reasons || err.guardViolations || [],
+      guardViolations: err.guardViolations || [],
+      requiresConfirmation: err.requiresConfirmation || null,
+      check: err.check || null,
+    });
+  }
+  const status = (err instanceof HostError || Number.isInteger(err.status)) && err.status ? err.status : 500;
   res.status(status).json({ error: err.message || String(err) });
 });
 
@@ -254,9 +265,38 @@ app.get('/api/instances', wrap(async (req, res) => {
   res.json({ target, instances });
 }));
 
+// Every bot launch goes through the price cross-check + profitability gate.
+// Saving a YAML without starting it (autoStart: false) is not gated.
+async function guardedLaunch(target, { configName, yaml, override }, launch) {
+  const gate = await guard.gateDeploy(target, { configName, yaml, override });
+  let killSwitch = null;
+  if (gate.info.live) {
+    // Stop-loss must be in conf_client.yml before the container reads it at startup
+    killSwitch = await hb.ensureKillSwitch(target, guard.guardSettings().liveStopLossPct);
+  }
+  const result = await launch();
+  let monitored = null;
+  if (gate.info.live && result && result.containerName) {
+    monitored = await guard.monitor.register({ target, containerName: result.containerName, configName, info: gate.info }).catch(() => null);
+  }
+  return {
+    ...result,
+    guard: {
+      allowed: gate.check ? gate.check.allowed : false,
+      overridden: gate.overridden,
+      live: gate.info.live,
+      killSwitch,
+      monitored: !!monitored,
+      check: gate.check,
+    },
+  };
+}
+
 app.post('/api/deploy', wrap(async (req, res) => {
-  const { target = 'local', ...opts } = req.body || {};
-  res.json(await hb.deployStrategy(target, opts));
+  const { target = 'local', override, ...opts } = req.body || {};
+  if (opts.autoStart === false) return res.json(await hb.deployStrategy(target, opts));
+  res.json(await guardedLaunch(target, { configName: opts.configName, yaml: opts.yaml, override },
+    () => hb.deployStrategy(target, opts)));
 }));
 
 app.post('/api/deploy-base', wrap(async (req, res) => {
@@ -291,8 +331,9 @@ app.get('/api/instance/:id/config', wrap(async (req, res) => {
 }));
 
 app.post('/api/instance/edit', wrap(async (req, res) => {
-  const { target = 'local', containerId, configName, yaml } = req.body || {};
-  res.json(await hb.editContainerConfig(target, { containerId, configName, yaml }));
+  const { target = 'local', containerId, configName, yaml, override } = req.body || {};
+  res.json(await guardedLaunch(target, { configName, yaml, override },
+    () => hb.editContainerConfig(target, { containerId, configName, yaml })));
 }));
 
 app.post('/api/instance/:id/attach', wrap(async (req, res) => {
@@ -379,6 +420,39 @@ app.post('/api/paper-sim/tick', wrap(async (req, res) => res.json(await paperEng
 app.post('/api/paper-sim/verify', wrap(async (req, res) => {
   res.json(await verifyOpportunity(req.body || {}));
 }));
+
+// ─── Price Cross-Check & Guard Rails ──────────────────────────────────────────
+app.post('/api/crosscheck', wrap(async (req, res) => {
+  const b = req.body || {};
+  res.json(await guard.runCrossCheck({
+    symbol: b.symbol, quote: b.quote, exA: b.exA, exB: b.exB,
+    strategy: b.strategy, tradeSize: Number(b.tradeSize) || 1000, target: b.target || 'local',
+    minProfitabilityPct: b.minProfitabilityPct != null && b.minProfitabilityPct !== '' ? Number(b.minProfitabilityPct) : null,
+    scannerNetPct: b.scannerNetPct != null && b.scannerNetPct !== '' ? Number(b.scannerNetPct) : null,
+  }));
+}));
+
+app.get('/api/crosscheck/history', (req, res) => res.json({ history: guard.history }));
+
+app.get('/api/guard', (req, res) => {
+  res.json({
+    settings: guard.guardSettings(),
+    monitor: guard.monitor.status(),
+    audit: guard.readAudit().slice(0, 50),
+  });
+});
+
+app.post('/api/guard/settings', (req, res) => res.json({ settings: guard.updateGuardSettings(req.body || {}) }));
+
+app.post('/api/guard/monitor/run', wrap(async (req, res) => {
+  await guard.monitor.tick();
+  res.json(guard.monitor.status());
+}));
+
+app.delete('/api/guard/bots/:key', (req, res) => {
+  guard.monitor.remove(String(req.params.key));
+  res.json(guard.monitor.status());
+});
 
 // ─── Profitability Projections, Server Advisor & Provisioning ────────────────
 app.post('/api/advisor/projections', (req, res) => {

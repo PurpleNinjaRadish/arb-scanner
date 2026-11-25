@@ -57,6 +57,16 @@ ssh -L 3001:127.0.0.1:3001 user@your-vps-ip
 4. **Profit Projections**: 3-scenario (Conservative / Base / Optimistic) daily/monthly/annual projections after fees, slippage, rebalancing, and VPS cost, plus a Fee Tier Sensitivity Matrix and auto-fill from observed scanner/paper results.
 5. **Servers & Sizing**: Interactive VPS capacity sizer (`~450 MB RAM + 0.25 vCPU` per bot + `750 MB` base), region recommendations (`us-east-1` / Ashburn VA for Kraken × Coinbase), live exchange RTT latency benchmarks from local or remote hosts, and 1-click SSH server bootstrapping (Docker, log rotation, swap, NTP, Hummingbot image).
 
+## Pre-Launch Price Cross-Check & Live Guard Rails (🛡 Cross-Check tab)
+Every bot launch (web Deploy dialog, Hummingbot "Save & Restart", Android quick deploy) runs a price cross-check first. Run it manually from the 🛡 Cross-Check tab, or turn on auto re-check.
+
+- **Price cross-reference**: the scanner's prices are checked against fresh order books on both exchanges and against the median price on the other supported exchanges. Stale feeds, crossed or thin books, and two different tokens sharing a ticker fail the check.
+- **Two profitability calculations; both must pass**:
+  1. *Per trade*: order-book fill prices for the full order size, minus both legs' trading fees and a slippage buffer.
+  2. *Monthly*: trades per month (from scanner history, or an assumption until there is 1h of history) × net per trade, minus rebalancing transfers and server cost. Server cost is the host's monthly cost if you entered one; otherwise it's the **estimated average server cost** from Server Suggestions (average of the top 3 suggested servers that fit your bot count).
+- **Blocked bots need manual confirmation**: tick the confirmation box; live bots also require typing `COIN-QUOTE LIVE`. Every decision and override is logged. Phone deploys can't override; confirm on the desktop.
+- **Live guard rails** (can't be overridden; change them in settings): max order size, minimum profitability floor, Hummingbot kill-switch stop-loss written to `conf_client.yml` (2.x `kill_switch_mode` format), and a backend monitor that stops a live bot and pushes an alert when its realized loss reaches the $ limit. The monitor uses realized (matched buy/sell) P&L; the kill switch covers overall return, including inventory.
+
 ## Tests
 ```bash
 npm run test:server

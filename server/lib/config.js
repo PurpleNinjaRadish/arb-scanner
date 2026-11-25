@@ -37,6 +37,23 @@ const DEFAULT_ALERTS = {
   webhookUrl: '',
 };
 
+// Pre-deploy price cross-check, profitability gate and live-trading guard rails
+const DEFAULT_GUARD = {
+  slippageBps: 5,               // extra execution buffer per leg, on top of order-book VWAP
+  captureRatePct: 50,           // share of observed opportunities a bot actually fills
+  fallbackTradesPerDay: 4,      // used until the scanner has >= 1h of history for the pair
+  rebalanceMonthlyUsd: 5,       // transfer/withdrawal cost to rebalance inventory
+  maxRefDeviationPct: 2,        // venue mid vs median of other exchanges
+  maxTickerDriftPct: 0.5,       // scanner ticker vs fresh order book
+  maxGrossSpreadPct: 5,         // wider gaps usually mean a different token or a halted market
+  liveStopLossPct: 3,           // Hummingbot kill switch: stop when return % <= -3%
+  liveMaxLossUsd: 50,           // backend monitor stops a live bot at this realized loss
+  liveMaxOrderUsd: 1000,        // hard cap on a live bot's order size
+  liveMinProfitabilityPct: 0.1, // live bots must require at least this net edge per trade
+  monitorIntervalSec: 60,
+  autoRecheckEnabled: true,     // re-run the price cross-check for running live bots
+};
+
 const DEFAULTS = {
   hbImage: 'hummingbot/hummingbot:version-2.14.0',
   hbPassword: '',
@@ -46,6 +63,7 @@ const DEFAULTS = {
   fees: DEFAULT_FEES,
   vpnDedicatedIp: '',
   alerts: DEFAULT_ALERTS,
+  guard: DEFAULT_GUARD,
   watchAccounts: [],
 };
 
@@ -56,6 +74,7 @@ function migrate(raw) {
   cfg.local = { ...DEFAULTS.local, ...(raw.local || {}) };
   cfg.fees = { ...DEFAULT_FEES, ...(raw.fees || {}) };
   cfg.alerts = { ...DEFAULT_ALERTS, ...(raw.alerts || {}) };
+  cfg.guard = { ...DEFAULT_GUARD, ...(raw.guard || {}) };
   if (!Array.isArray(cfg.servers)) cfg.servers = [];
   if (!Array.isArray(cfg.watchAccounts)) cfg.watchAccounts = [];
 
@@ -106,6 +125,7 @@ function publicConfig(cfg = loadConfig()) {
     servers: cfg.servers.map(s => ({ ...s })),
     fees: cfg.fees,
     vpnDedicatedIp: cfg.vpnDedicatedIp,
+    guard: cfg.guard,
     alerts: {
       ...a,
       telegramBotToken: '',
@@ -135,4 +155,4 @@ function validateServer(s) {
   return errors;
 }
 
-module.exports = { loadConfig, saveConfig, updateConfig, publicConfig, validateServer, DEFAULT_FEES, DEFAULT_ALERTS, CONFIG_PATH };
+module.exports = { loadConfig, saveConfig, updateConfig, publicConfig, validateServer, DEFAULT_FEES, DEFAULT_ALERTS, DEFAULT_GUARD, CONFIG_PATH };

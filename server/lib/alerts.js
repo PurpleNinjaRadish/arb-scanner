@@ -14,7 +14,7 @@ const { EXCHANGES } = require('./exchanges');
 const { runScan } = require('./scanner');
 const { verifyOpportunity } = require('./paper');
 
-const DATA_DIR = path.join(__dirname, '..', 'data');
+const DATA_DIR = process.env.ARB_DATA_DIR || path.join(__dirname, '..', 'data');
 const ALERTS_FILE = path.join(DATA_DIR, 'alerts.json');
 
 class AlertManager {

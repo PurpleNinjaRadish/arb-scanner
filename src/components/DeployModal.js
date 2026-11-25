@@ -3,6 +3,7 @@ import { useState, useEffect, useCallback } from 'react';
 import { api } from '../api';
 import { EXCHANGES, fmtUsd, fmtPrice } from '../constants';
 import { C, S, Modal, Badge, Notice, CopyBtn } from '../ui';
+import CrossCheckReport, { OverrideConfirm, overrideReady } from './CrossCheckReport';
 
 export default function DeployModal({ target, pair, quote = 'USD', hosts = [], defaultHost = 'local', vpnStatus, onClose, onDeployed }) {
   const [strategy, setStrategy] = useState('amm_arb'); // 'amm_arb' | 'cross_exchange_market_making'
@@ -25,6 +26,13 @@ export default function DeployModal({ target, pair, quote = 'USD', hosts = [], d
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState(null);
   const [error, setError] = useState('');
+  const [check, setCheck] = useState(null);
+  const [checking, setChecking] = useState(false);
+  const [checkErr, setCheckErr] = useState('');
+  const [guardCfg, setGuardCfg] = useState(null);
+  const [confirmed, setConfirmed] = useState(false);
+  const [typed, setTyped] = useState('');
+  const [violations, setViolations] = useState([]);
 
   const refPrice = target.buyPrice || target.priceA || 1;
   const baseAmt = refPrice > 0 ? (tradeSizeUsd / refPrice) : 0;
@@ -62,8 +70,50 @@ export default function DeployModal({ target, pair, quote = 'USD', hosts = [], d
 
   useEffect(() => { refreshYaml(); }, [refreshYaml]);
 
+  // Guard-rail settings (live limits)
+  useEffect(() => {
+    api('/api/guard').then(d => setGuardCfg(d.settings)).catch(() => {});
+  }, []);
+
+  // Automatic price cross-check whenever the launch parameters change
+  const runCheck = useCallback(async () => {
+    setChecking(true); setCheckErr('');
+    try {
+      const d = await api('/api/crosscheck', {
+        method: 'POST',
+        body: {
+          symbol: target.symbol, quote, exA: pair.a, exB: pair.b, strategy,
+          tradeSize: tradeSizeUsd, target: hostId,
+          minProfitabilityPct: minProfitPct, scannerNetPct: target.netProfit,
+        },
+      });
+      setCheck(d);
+    } catch (e) {
+      setCheckErr(e.message);
+      setCheck(null);
+    } finally {
+      setChecking(false);
+    }
+  }, [target.symbol, target.netProfit, quote, pair.a, pair.b, strategy, tradeSizeUsd, hostId, minProfitPct]);
+
+  useEffect(() => {
+    const t = setTimeout(runCheck, 700);
+    return () => clearTimeout(t);
+  }, [runCheck]);
+
+  useEffect(() => { setConfirmed(false); setTyped(''); }, [paperTrade, target.symbol, hostId]);
+
+  const phrase = `${target.symbol}-${quote} LIVE`;
+  const needsOverride = !(check && check.allowed);
+  const overrideOk = overrideReady({ live: !paperTrade, phrase, confirmed, typed });
+  const liveRailIssues = (!paperTrade && guardCfg) ? [
+    tradeSizeUsd > guardCfg.liveMaxOrderUsd ? `Order size ${fmtUsd(tradeSizeUsd, 0)} is above the live max of ${fmtUsd(guardCfg.liveMaxOrderUsd, 0)}` : null,
+    minProfitPct < guardCfg.liveMinProfitabilityPct ? `Min profitability ${minProfitPct}% is below the live floor of ${guardCfg.liveMinProfitabilityPct}%` : null,
+  ].filter(Boolean) : [];
+  const launchBlocked = liveRailIssues.length > 0 || checking || (needsOverride && !overrideOk);
+
   const submit = async (autoStart) => {
-    setBusy(true); setError(''); setResult(null);
+    setBusy(true); setError(''); setResult(null); setViolations([]);
     try {
       const res = await api('/api/deploy', {
         method: 'POST',
@@ -75,12 +125,17 @@ export default function DeployModal({ target, pair, quote = 'USD', hosts = [], d
           autoStart,
           memLimit,
           cpuLimit,
+          override: autoStart && needsOverride ? { confirmed, phrase: typed } : undefined,
         },
       });
       setResult(res);
+      if (res.guard && res.guard.check) setCheck(res.guard.check);
       if (onDeployed) onDeployed(res);
     } catch (e) {
       setError(e.message);
+      if (e.data && e.data.check) setCheck(e.data.check);
+      if (e.data && e.data.guardViolations && e.data.guardViolations.length) setViolations(e.data.guardViolations);
+      if (e.status === 409) { setConfirmed(false); }
     } finally {
       setBusy(false);
     }
@@ -193,6 +248,28 @@ export default function DeployModal({ target, pair, quote = 'USD', hosts = [], d
           : `XEMM posts a maker limit order on ${EXCHANGES[target.buyOn]?.label} (lower maker fee!) and immediately hedges fills on ${EXCHANGES[target.sellOn]?.label}. Ideal for Kraken × Coinbase because maker fees cut break-even spread in half.`}
       </div>
 
+      {/* Pre-launch price cross-check */}
+      <div style={{ ...S.card, padding: 12, marginBottom: 14 }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+          <span style={S.lbl}>Pre-launch price cross-check {checking ? '(checking…)' : ''}</span>
+          <button className="tbtn" disabled={checking} onClick={runCheck} style={{ ...S.btnMuted, padding: '4px 10px', fontSize: 10 }}>Re-check</button>
+        </div>
+        {checkErr && <Notice tone="error">Cross-check failed: {checkErr}</Notice>}
+        {check ? <CrossCheckReport check={check} compact /> : !checkErr && <div style={{ fontSize: 11, color: C.muted }}>Fetching live order books…</div>}
+      </div>
+
+      {!paperTrade && guardCfg && (
+        <Notice tone={liveRailIssues.length ? 'error' : 'info'}>
+          {`Live guard rails: kill-switch stop-loss at −${guardCfg.liveStopLossPct}% return · bot stopped at −${fmtUsd(guardCfg.liveMaxLossUsd, 0)} realized loss · max order ${fmtUsd(guardCfg.liveMaxOrderUsd, 0)} · min profitability ${guardCfg.liveMinProfitabilityPct}%`}
+          {liveRailIssues.length ? `\n✗ ${liveRailIssues.join('\n✗ ')}` : ''}
+        </Notice>
+      )}
+      {violations.length > 0 && <Notice tone="error">{`Blocked by live guard rails:\n✗ ${violations.join('\n✗ ')}`}</Notice>}
+
+      {needsOverride && check && !checking && (
+        <OverrideConfirm live={!paperTrade} phrase={phrase} confirmed={confirmed} setConfirmed={setConfirmed} typed={typed} setTyped={setTyped} />
+      )}
+
       {warnings.length > 0 && <Notice tone="warn">{warnings.join('\n')}</Notice>}
       {vpnBlocked && (
         <Notice tone="error">
@@ -220,6 +297,9 @@ export default function DeployModal({ target, pair, quote = 'USD', hosts = [], d
           ✓ {result.message || `Saved ${result.configName}.yml`}
           {result.containerId && result.containerId !== 'interactive' ? `\nContainer ID: ${result.containerId.slice(0, 12)} (${result.containerName})` : ''}
           {result.paperSetup?.changed ? '\nAuto-configured conf/conf_client.yml with paper exchanges & starter balances.' : ''}
+          {result.guard?.overridden ? '\nLaunched with manual override (logged).' : ''}
+          {result.guard?.killSwitch ? `\nStop-loss: kill switch at ${result.guard.killSwitch.killSwitchRate}% return${result.guard.killSwitch.keptExisting ? ' (kept your tighter setting)' : ''}.` : ''}
+          {result.guard?.monitored ? '\nLive stop-loss monitor is watching this bot.' : ''}
           {result.command && !result.opened ? `\nRun in terminal:\n${result.command}` : ''}
         </Notice>
       )}
@@ -229,8 +309,9 @@ export default function DeployModal({ target, pair, quote = 'USD', hosts = [], d
         <button className="tbtn" disabled={busy || vpnBlocked} onClick={() => submit(false)} style={S.btn(C.yellow)}>
           💾 Save YAML Only
         </button>
-        <button className="tbtn" disabled={busy || vpnBlocked} onClick={() => submit(true)} style={S.btn(paperTrade ? C.green : C.red, true)}>
-          {busy ? 'Deploying...' : `🚀 Deploy ${paperTrade ? 'Paper' : 'LIVE'} Bot (${fmtUsd(tradeSizeUsd, 0)})`}
+        <button className="tbtn" disabled={busy || vpnBlocked || launchBlocked} onClick={() => submit(true)} style={S.btn(paperTrade ? C.green : C.red, true)}
+          title={launchBlocked ? 'Needs a passing cross-check or manual confirmation' : ''}>
+          {busy ? 'Deploying...' : `🚀 ${needsOverride ? 'Override & ' : ''}Deploy ${paperTrade ? 'Paper' : 'LIVE'} Bot (${fmtUsd(tradeSizeUsd, 0)})`}
         </button>
       </div>
     </Modal>

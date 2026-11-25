@@ -11,6 +11,7 @@ import ServersAdvisorTab from './components/ServersAdvisorTab';
 import AlertsTab from './components/AlertsTab';
 import PortfolioTab from './components/PortfolioTab';
 import DeployModal from './components/DeployModal';
+import CrossCheckTab from './components/CrossCheckTab';
 
 const NAV = [
   ['scanner',     '📡 Scanner'],
@@ -18,6 +19,7 @@ const NAV = [
   ['portfolio',   '💼 Holdings & Txns'],
   ['hummingbot',  '🐳 Hummingbot'],
   ['paper',       '🧪 Paper Lab'],
+  ['crosscheck',  '🛡 Cross-Check'],
   ['projections', '📈 Projections'],
   ['servers',     '☁ Servers'],
 ];
@@ -202,7 +204,7 @@ export default function App() {
           </div>
           <div style={{ display: 'flex', gap: 6 }}>
             <button className="tbtn" onClick={() => { setTab('alerts'); setToastAlert(null); }} style={S.btn(C.cyan)}>View Alerts</button>
-            {!toastAlert.isTest && (
+            {!toastAlert.isTest && toastAlert.kind !== 'guard' && (
               <button className="tbtn" onClick={() => { deployFromAlert(toastAlert); setToastAlert(null); }} style={S.btn(C.green, true)}>🤖 Deploy Bot</button>
             )}
           </div>
@@ -364,6 +366,16 @@ export default function App() {
             quote={quote}
             onSendToProjections={seed => { setProjSeed(seed); setTab('projections'); }}
             onOpenHummingbotPaper={() => setTab('hummingbot')}
+          />
+        )}
+
+        {tab === 'crosscheck' && (
+          <CrossCheckTab
+            activePairId={activePairId}
+            quote={quote}
+            tradeSize={tradeSize}
+            hosts={hosts}
+            selectedHost={selectedHost}
           />
         )}
 

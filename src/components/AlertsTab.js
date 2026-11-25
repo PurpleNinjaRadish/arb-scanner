@@ -342,10 +342,12 @@ export default function AlertsTab({
                     {!a.read && <Badge color={C.green}>NEW</Badge>}
                   </div>
                   <div style={{ fontSize: 11, color: C.muted, marginTop: 4 }}>
-                    {new Date(a.ts).toLocaleString()} · Buy {EXCHANGES[a.buyOn]?.label || a.buyOn} @ {fmtPrice(a.buyPrice)} → Sell {EXCHANGES[a.sellOn]?.label || a.sellOn} @ {fmtPrice(a.sellPrice)} · Size {fmtUsd(a.tradeSize, 0)}
+                    {a.kind === 'guard'
+                      ? `${new Date(a.ts).toLocaleString()} · ${a.message}`
+                      : <>{new Date(a.ts).toLocaleString()} · Buy {EXCHANGES[a.buyOn]?.label || a.buyOn} @ {fmtPrice(a.buyPrice)} → Sell {EXCHANGES[a.sellOn]?.label || a.sellOn} @ {fmtPrice(a.sellPrice)} · Size {fmtUsd(a.tradeSize, 0)}</>}
                   </div>
                 </div>
-                {onDeployFromAlert && !a.isTest && (
+                {onDeployFromAlert && !a.isTest && a.kind !== 'guard' && (
                   <button className="tbtn" onClick={() => onDeployFromAlert(a)} style={S.btn(C.green, true)}>
                     🤖 Deploy Bot
                   </button>

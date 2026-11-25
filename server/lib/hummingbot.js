@@ -265,8 +265,7 @@ async function getPaperConfig(target = 'local') {
     balances: (pt.paper_trade_account_balance && typeof pt.paper_trade_account_balance === 'object')
       ? pt.paper_trade_account_balance
       : {},
-    killSwitchEnabled: !!doc.kill_switch_enabled,
-    killSwitchRate: doc.kill_switch_rate ?? -100,
+    ...readKillSwitch(doc),
     tickSize: doc.tick_size ?? 1.0,
     rawYaml: raw,
   };
@@ -295,12 +294,59 @@ async function savePaperConfig(target = 'local', { balances, exchanges, killSwit
     }
     doc.paper_trade.paper_trade_account_balance = clean;
   }
-  if (killSwitchEnabled !== undefined) doc.kill_switch_enabled = !!killSwitchEnabled;
-  if (killSwitchRate !== undefined) doc.kill_switch_rate = Number(killSwitchRate);
+  if (killSwitchEnabled !== undefined || killSwitchRate !== undefined) {
+    const cur = readKillSwitch(doc);
+    const enabled = killSwitchEnabled !== undefined ? !!killSwitchEnabled : cur.killSwitchEnabled;
+    const rate = killSwitchRate !== undefined ? Number(killSwitchRate) : cur.killSwitchRate;
+    writeKillSwitch(doc, enabled, rate);
+  }
   if (tickSize !== undefined) doc.tick_size = Number(tickSize);
 
   await host.writeFile('conf/conf_client.yml', yaml.dump(doc, { lineWidth: -1, noRefs: true }));
   return getPaperConfig(target);
+}
+
+// Hummingbot 2.x stores the kill switch as `kill_switch_mode: { kill_switch_rate: -5.0 }`
+// (disabled = `kill_switch_mode: {}`). 1.x used kill_switch_enabled / kill_switch_rate,
+// which 2.x ignores — read both, always write the 2.x form.
+function readKillSwitch(doc) {
+  const mode = doc && doc.kill_switch_mode;
+  if (mode && typeof mode === 'object' && mode.kill_switch_rate != null) {
+    return { killSwitchEnabled: true, killSwitchRate: Number(mode.kill_switch_rate) };
+  }
+  if (doc && doc.kill_switch_enabled) {
+    return { killSwitchEnabled: true, killSwitchRate: Number(doc.kill_switch_rate ?? -100) };
+  }
+  return { killSwitchEnabled: false, killSwitchRate: Number((doc && doc.kill_switch_rate) ?? -100) };
+}
+
+function writeKillSwitch(doc, enabled, rate) {
+  doc.kill_switch_mode = enabled ? { kill_switch_rate: Number(rate) } : {};
+  delete doc.kill_switch_enabled;
+  delete doc.kill_switch_rate;
+}
+
+// Live-trading stop-loss: make sure the host's kill switch stops bots at -stopLossPct
+// return or tighter. An existing tighter stop (e.g. -2% when -3% is required) is kept.
+async function ensureKillSwitch(target = 'local', stopLossPct) {
+  const pct = Math.abs(Number(stopLossPct));
+  if (!(pct > 0)) throw new HostError('Stop-loss % must be greater than 0', { status: 400 });
+  const host = getHost(target);
+  await host.ensureDirs();
+  const { raw } = await readClientConfigRaw(host);
+  let doc = {};
+  try { doc = (raw && yaml.load(raw)) || {}; } catch (_) { doc = {}; }
+  if (!doc || typeof doc !== 'object') doc = {};
+  const cur = readKillSwitch(doc);
+  const required = -pct;
+  const keepCurrent = cur.killSwitchEnabled && cur.killSwitchRate < 0 && cur.killSwitchRate >= required;
+  const rate = keepCurrent ? cur.killSwitchRate : required;
+  const changed = !keepCurrent || doc.kill_switch_enabled !== undefined || doc.kill_switch_rate !== undefined;
+  if (changed) {
+    writeKillSwitch(doc, true, rate);
+    await host.writeFile('conf/conf_client.yml', yaml.dump(doc, { lineWidth: -1, noRefs: true }));
+  }
+  return { changed, killSwitchRate: rate, keptExisting: keepCurrent };
 }
 
 // Automatically ensures paper connectors and starter balances exist before a paper bot starts
@@ -684,6 +730,31 @@ function parseCsvLine(line) {
   return out;
 }
 
+function aggregateByPair(trades) {
+  const byPair = {};
+  for (const t of trades) {
+    const g = byPair[t.pair] || (byPair[t.pair] = { pair: t.pair, buys: 0, sells: 0, buyQty: 0, sellQty: 0, buyCost: 0, sellRev: 0, fees: 0 });
+    g.fees += t.feeQuote;
+    if (t.side === 'BUY') { g.buys++; g.buyQty += t.amount; g.buyCost += t.notional; }
+    else { g.sells++; g.sellQty += t.amount; g.sellRev += t.notional; }
+  }
+  return Object.values(byPair).map(g => {
+    const avgBuy = g.buyQty ? g.buyCost / g.buyQty : 0;
+    const avgSell = g.sellQty ? g.sellRev / g.sellQty : 0;
+    const matchedQty = Math.min(g.buyQty, g.sellQty);
+    const grossMatchedPnl = matchedQty * (avgSell - avgBuy);
+    return {
+      ...g,
+      avgBuy,
+      avgSell,
+      matchedQty,
+      inventoryDelta: g.buyQty - g.sellQty,
+      grossMatchedPnl,
+      netMatchedPnl: grossMatchedPnl - g.fees,
+    };
+  }).sort((a, b) => Math.abs(b.netMatchedPnl) - Math.abs(a.netMatchedPnl));
+}
+
 async function getTradesAndPnl(target = 'local') {
   const host = getHost(target);
   const files = await host.listDir('data');
@@ -736,35 +807,12 @@ async function getTradesAndPnl(target = 'local') {
   }
 
   // Aggregate by pair (matched buy/sell volume gives realized arbitrage P&L)
-  const byPair = {};
-  let totalVolume = 0, totalFees = 0;
-  for (const t of trades) {
-    totalVolume += t.notional;
-    totalFees += t.feeQuote;
-    const g = byPair[t.pair] || (byPair[t.pair] = { pair: t.pair, buys: 0, sells: 0, buyQty: 0, sellQty: 0, buyCost: 0, sellRev: 0, fees: 0 });
-    g.fees += t.feeQuote;
-    if (t.side === 'BUY') { g.buys++; g.buyQty += t.amount; g.buyCost += t.notional; }
-    else { g.sells++; g.sellQty += t.amount; g.sellRev += t.notional; }
-  }
-
-  let realizedPnl = 0;
-  const pairSummary = Object.values(byPair).map(g => {
-    const avgBuy = g.buyQty ? g.buyCost / g.buyQty : 0;
-    const avgSell = g.sellQty ? g.sellRev / g.sellQty : 0;
-    const matchedQty = Math.min(g.buyQty, g.sellQty);
-    const grossMatchedPnl = matchedQty * (avgSell - avgBuy);
-    const netMatchedPnl = grossMatchedPnl - g.fees;
-    realizedPnl += netMatchedPnl;
-    return {
-      ...g,
-      avgBuy,
-      avgSell,
-      matchedQty,
-      inventoryDelta: g.buyQty - g.sellQty,
-      grossMatchedPnl,
-      netMatchedPnl,
-    };
-  }).sort((a, b) => Math.abs(b.netMatchedPnl) - Math.abs(a.netMatchedPnl));
+  const totalVolume = trades.reduce((t, x) => t + x.notional, 0);
+  const totalFees = trades.reduce((t, x) => t + x.feeQuote, 0);
+  const pairSummary = aggregateByPair(trades);
+  const realizedPnl = pairSummary.reduce((t, g) => t + g.netMatchedPnl, 0);
+  // Live (non-paper) trades only — used by the live stop-loss monitor
+  const byPairLive = Object.fromEntries(aggregateByPair(trades.filter(t => !t.paper)).map(g => [g.pair, g]));
 
   return {
     target,
@@ -779,6 +827,7 @@ async function getTradesAndPnl(target = 'local') {
       netBps: totalVolume > 0 ? (realizedPnl / (totalVolume / 2)) * 10000 : 0,
     },
     byPair: pairSummary,
+    byPairLive,
     trades: trades.slice(-250).reverse(),
     csvData: rawChunks.join('\n\n'),
   };
@@ -810,6 +859,8 @@ module.exports = {
   getPaperConfig,
   savePaperConfig,
   ensurePaperReady,
+  ensureKillSwitch,
+  readKillSwitch,
   pullImage,
   getTradesAndPnl,
   DEFAULT_PAPER_EXCHANGES,

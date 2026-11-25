@@ -1,0 +1,256 @@
+{
+ "pass": {
+  "id": "cc_3c97674b",
+  "checkedAt": 1795628824746,
+  "symbol": "SOL",
+  "quote": "USD",
+  "exA": "kraken",
+  "exB": "coinbase",
+  "strategy": "amm_arb",
+  "pair": "SOL-USD",
+  "refPrice": 151.75,
+  "prices": [
+   {
+    "ex": "kraken",
+    "label": "Kraken",
+    "tickerBid": 149.955,
+    "tickerAsk": 150.045,
+    "tickerMid": 150,
+    "tickerIsBook": true,
+    "bookBid": 149.955,
+    "bookAsk": 150.045,
+    "bookMid": 150,
+    "bookSpreadPct": 0.06,
+    "driftPct": 0,
+    "refDevPct": 1.1206,
+    "tickerError": null,
+    "bookError": null
+   },
+   {
+    "ex": "coinbase",
+    "label": "Coinbase Adv",
+    "tickerBid": 153.45395,
+    "tickerAsk": 153.54605,
+    "tickerMid": 153.5,
+    "tickerIsBook": true,
+    "bookBid": 153.45395,
+    "bookAsk": 153.54605,
+    "bookMid": 153.5,
+    "bookSpreadPct": 0.06,
+    "driftPct": 0,
+    "refDevPct": 1.1866,
+    "tickerError": null,
+    "bookError": null
+   }
+  ],
+  "reference": {
+   "median": 151.7,
+   "sources": [
+    {
+     "ex": "okx",
+     "label": "OKX",
+     "quote": "USDT",
+     "mid": 151.7
+    }
+   ]
+  },
+  "perTrade": {
+   "pass": true,
+   "buyOn": "kraken",
+   "sellOn": "coinbase",
+   "baseAmount": 3.33233363,
+   "tradeSize": 500.28,
+   "buyVwap": 150.13047165,
+   "sellVwap": 153.36648401,
+   "grossPct": 2.1555,
+   "grossDollar": 10.7835,
+   "feeBuyPct": 0.4,
+   "feeSellPct": 1.2,
+   "feeDollar": 8.134,
+   "slippageBps": 5,
+   "slippageDollar": 0.5036,
+   "netDollar": 2.1459,
+   "netPct": 0.4289,
+   "breakevenPct": 1.7,
+   "minProfitabilityPct": null,
+   "meetsBotThreshold": null,
+   "reason": "Nets $2.15 (0.429%) per trade after fees and slippage"
+  },
+  "monthly": {
+   "pass": true,
+   "source": "observed",
+   "observedHours": 5,
+   "episodesPerHour": 6,
+   "captureRatePct": 50,
+   "tradesPerMonth": 2160,
+   "netPctPerTrade": 0.4,
+   "netPerTrade": 2.0011,
+   "tradingNetMonthly": 4322.42,
+   "feesMonthly": 17289.68,
+   "slippageMonthly": 1080.6,
+   "rebalanceMonthly": 5,
+   "transactionCostsMonthly": 18375.28,
+   "serverMonthly": 11.5,
+   "serverSource": "estimate",
+   "serverDetail": "est",
+   "monthlyNet": 4305.92,
+   "reason": "Nets $4305.92/month after $11.50 server and $5.00 rebalancing"
+  },
+  "checks": [
+   {
+    "id": "books",
+    "label": "Live order books fetched on both venues",
+    "status": "pass",
+    "detail": "Fresh L2 books retrieved directly from each exchange"
+   },
+   {
+    "id": "book_sane",
+    "label": "Order books are not crossed (bid < ask)",
+    "status": "pass",
+    "detail": "Both books are well-formed"
+   },
+   {
+    "id": "ticker_vs_book",
+    "label": "Scanner price matches live book (max 0.5% drift)",
+    "status": "pass",
+    "detail": "Kraken: 0.000% · Coinbase Adv: 0.000%"
+   },
+   {
+    "id": "reference",
+    "label": "Prices match 1 independent exchange(s) (max 2% off)",
+    "status": "pass",
+    "detail": "Reference median 151.7 · Kraken 1.121% · Coinbase Adv 1.187%"
+   },
+   {
+    "id": "plausible_gap",
+    "label": "Venue price gap is plausible (max 5%)",
+    "status": "pass",
+    "detail": "Mid prices differ by 2.333%"
+   },
+   {
+    "id": "depth",
+    "label": "Enough order-book depth to fill the full order on both legs",
+    "status": "pass",
+    "detail": "Kraken asks filled 3.33233363/3.33233363 · Coinbase Adv bids filled 3.33233363/3.33233363"
+   }
+  ],
+  "dataOk": true,
+  "profitableBoth": true,
+  "allowed": true,
+  "blockers": []
+ },
+ "fail": {
+  "id": "cc_9633373c",
+  "checkedAt": 1795628824746,
+  "symbol": "SOL",
+  "quote": "USD",
+  "exA": "kraken",
+  "exB": "coinbase",
+  "strategy": "amm_arb",
+  "pair": "SOL-USD",
+  "refPrice": null,
+  "prices": [
+   {
+    "ex": "kraken",
+    "label": "Kraken",
+    "tickerBid": 149.955,
+    "tickerAsk": 150.045,
+    "tickerMid": 150,
+    "tickerIsBook": true,
+    "bookBid": 149.955,
+    "bookAsk": 150.045,
+    "bookMid": 150,
+    "bookSpreadPct": 0.06,
+    "driftPct": 0,
+    "refDevPct": 1.1206,
+    "tickerError": null,
+    "bookError": null
+   },
+   {
+    "ex": "coinbase",
+    "label": "Coinbase Adv",
+    "tickerBid": null,
+    "tickerAsk": null,
+    "tickerMid": null,
+    "tickerIsBook": false,
+    "bookBid": null,
+    "bookAsk": null,
+    "bookMid": null,
+    "bookSpreadPct": null,
+    "driftPct": null,
+    "refDevPct": null,
+    "tickerError": null,
+    "bookError": "HTTP 503"
+   }
+  ],
+  "reference": {
+   "median": 151.7,
+   "sources": [
+    {
+     "ex": "okx",
+     "label": "OKX",
+     "quote": "USDT",
+     "mid": 151.7
+    }
+   ]
+  },
+  "perTrade": {
+   "pass": false,
+   "reason": "Order books unavailable"
+  },
+  "monthly": {
+   "pass": false,
+   "source": "assumed",
+   "observedHours": 0,
+   "episodesPerHour": null,
+   "captureRatePct": 50,
+   "tradesPerMonth": 60,
+   "netPctPerTrade": 0,
+   "netPerTrade": 0,
+   "tradingNetMonthly": 0,
+   "feesMonthly": 0,
+   "slippageMonthly": 30,
+   "rebalanceMonthly": 5,
+   "transactionCostsMonthly": 35,
+   "serverMonthly": 11.5,
+   "serverSource": "estimate",
+   "serverDetail": "est",
+   "monthlyNet": -16.5,
+   "reason": "Loses $16.50/month after $11.50 server and $5.00 rebalancing"
+  },
+  "checks": [
+   {
+    "id": "books",
+    "label": "Live order books fetched on both venues",
+    "status": "fail",
+    "detail": "Coinbase Adv: HTTP 503"
+   },
+   {
+    "id": "ticker_vs_book",
+    "label": "Scanner price matches live book (max 0.5% drift)",
+    "status": "warn",
+    "detail": "Kraken: 0.000% · Coinbase Adv: no scanner ticker (not listed)"
+   },
+   {
+    "id": "reference",
+    "label": "Prices match 1 independent exchange(s) (max 2% off)",
+    "status": "pass",
+    "detail": "Reference median 151.7 · Kraken 1.121% · Coinbase Adv n/a"
+   },
+   {
+    "id": "history",
+    "label": "Scanner history for this coin (>= 1h)",
+    "status": "warn",
+    "detail": "Only 0.00h observed — monthly figure assumes 4 signals/day. Run the Live Scanner longer for real rates."
+   }
+  ],
+  "dataOk": false,
+  "profitableBoth": false,
+  "allowed": false,
+  "blockers": [
+   "Live order books fetched on both venues: Coinbase Adv: HTTP 503",
+   "Per-trade: Order books unavailable",
+   "Monthly: Loses $16.50/month after $11.50 server and $5.00 rebalancing"
+  ]
+ }
+}

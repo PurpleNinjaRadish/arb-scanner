@@ -5,7 +5,7 @@ const fs = require('fs');
 const path = require('path');
 const { getQuotes, refineQuotes, health, EXCHANGES } = require('./exchanges');
 
-const DATA_DIR = path.join(__dirname, '..', 'data');
+const DATA_DIR = process.env.ARB_DATA_DIR || path.join(__dirname, '..', 'data');
 const STATS_FILE = path.join(DATA_DIR, 'opportunity_stats.json');
 const MAX_GAP_MS = 60000; // gaps longer than this don't count as "observed" time
 

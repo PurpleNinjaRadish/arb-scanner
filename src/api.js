@@ -41,7 +41,10 @@ export async function api(path, { method = 'GET', body, params } = {}) {
   let data = {};
   try { data = text ? JSON.parse(text) : {}; } catch (_) { data = { raw: text }; }
   if (!res.ok) {
-    throw new Error(data.error || `HTTP ${res.status}`);
+    const err = new Error(data.error || `HTTP ${res.status}`);
+    err.status = res.status;
+    err.data = data;
+    throw err;
   }
   return data;
 }

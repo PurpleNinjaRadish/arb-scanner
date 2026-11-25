@@ -188,9 +188,12 @@ function recommendServers({ targetBots = 4, pairId = 'kraken_coinbase', expected
     { item: 'Resource Budget Rule', value: `Budget ~${RAM_PER_BOT_GB * 1000} MB RAM + ${VCPU_PER_BOT} vCPU per bot, plus ${BASE_RAM_GB * 1000} MB RAM for OS + Docker. Target ≤80% max utilization.` },
   ];
 
+  const estimatedCost = summarizeEstimate(catalog, bots, prioritizeLatency);
+
   return {
     targetBots: bots,
     pairId,
+    estimatedCost,
     regionGuidance: guidance,
     recommended: topRemote,
     catalog,
@@ -204,6 +207,41 @@ function recommendServers({ targetBots = 4, pairId = 'kraken_coinbase', expected
   };
 }
 
+// ─── Estimated Average Server Cost ───────────────────────────────────────────
+// Average monthly price of the top suggested remote servers that can safely run
+// `bots` bots (same ranking as the Server Suggestions list). Used as the default
+// server cost in the profitability calculator and the pre-deploy check whenever
+// the user hasn't entered a real monthly cost for the host.
+const ESTIMATE_TOP_N = 3;
+function summarizeEstimate(catalog, bots, prioritizeLatency = false) {
+  // Premium dedicated-CPU tiers are only part of the estimate when latency is prioritised
+  const remote = catalog.filter(s => s.id !== 'local_pc' && (prioritizeLatency || !s.dedicatedCpu));
+  const fit = remote.filter(s => s.fits);
+  // One server fits → use the top suggestions as-is. Otherwise price a fleet of
+  // identical servers (ceil(bots / safe capacity) of each) and take the cheapest fleets.
+  const picks = fit.length
+    ? fit.slice(0, ESTIMATE_TOP_N).map(s => ({ s, count: 1 }))
+    : remote.filter(s => s.recommendedBots > 0)
+      .map(s => ({ s, count: Math.ceil(bots / s.recommendedBots) }))
+      .sort((a, b) => a.count * a.s.monthlyUsd - b.count * b.s.monthlyUsd)
+      .slice(0, ESTIMATE_TOP_N);
+  const costs = picks.map(p => p.count * p.s.monthlyUsd);
+  const avg = costs.reduce((t, c) => t + c, 0) / Math.max(1, costs.length);
+  return {
+    bots,
+    avgMonthlyUsd: Number(avg.toFixed(2)),
+    perBotMonthlyUsd: Number((avg / bots).toFixed(2)),
+    minMonthlyUsd: Math.min(...costs),
+    maxMonthlyUsd: Math.max(...costs),
+    basis: picks.map(p => ({ id: p.s.id, name: `${p.count > 1 ? `${p.count}× ` : ''}${p.s.provider} ${p.s.tier}`, monthlyUsd: p.count * p.s.monthlyUsd })),
+    method: `Average of the top ${picks.length} suggested server(s) that fit ${bots} bot(s)`,
+  };
+}
+
+function estimateServerCost({ bots = 1, pairId = 'kraken_coinbase', prioritizeLatency = false } = {}) {
+  return recommendServers({ targetBots: bots, pairId, prioritizeLatency }).estimatedCost;
+}
+
 // ─── Profitability & Cost-Effectiveness Projection Model ─────────────────────
 function projectProfitability({
   capital = 5000,
@@ -215,9 +253,10 @@ function projectProfitability({
   feeSellPct = 0.60,    // e.g. Coinbase maker 0.60% or taker 1.20%
   slippageBps = 8,      // total round-trip slippage in bps (both legs combined)
   captureRatePct = 70,  // % of detected opportunities that survive latency & fill
-  serverMonthlyUsd = 10.5,
+  serverMonthlyUsd = null, // null/'' → estimated average server cost for botsCount
   rebalanceMonthlyUsd = 5,
   strategyMode = 'xemm', // 'xemm' | 'amm_arb'
+  pairId = 'kraken_coinbase',
 } = {}) {
   const cap = Math.max(100, Number(capital) || 5000);
   const sz = Math.max(10, Number(tradeSize) || 500);
@@ -227,7 +266,11 @@ function projectProfitability({
   const feeTotalPct = (Number(feeBuyPct) || 0) + (Number(feeSellPct) || 0);
   const slipPct = (Number(slippageBps) || 0) / 100; // bps -> %
   const capture = Math.max(0, Math.min(100, Number(captureRatePct) || 0)) / 100;
-  const fixedMonthly = (Number(serverMonthlyUsd) || 0) + (Number(rebalanceMonthlyUsd) || 0);
+  const serverEstimate = estimateServerCost({ bots, pairId });
+  const serverFromInput = serverMonthlyUsd !== null && serverMonthlyUsd !== undefined && serverMonthlyUsd !== '' && Number.isFinite(Number(serverMonthlyUsd));
+  const serverUsd = serverFromInput ? Math.max(0, Number(serverMonthlyUsd)) : serverEstimate.avgMonthlyUsd;
+  const rebalanceUsd = Math.max(0, Number(rebalanceMonthlyUsd) || 0);
+  const fixedMonthly = serverUsd + rebalanceUsd;
 
   const runScenario = (captureMult, spreadMult, label) => {
     const effGrossPct = grossPct * spreadMult;
@@ -244,6 +287,8 @@ function projectProfitability({
     const annualNetAfterServer = monthlyNetAfterServer * 12;
     const monthlyVolume = sz * 2 * effTradesDay * 30;
     const monthlyFees = feeDollarTrade * effTradesDay * 30;
+    const monthlySlippage = slipDollarTrade * effTradesDay * 30;
+    const monthlyTransactionCosts = monthlyFees + monthlySlippage + rebalanceUsd;
     const monthlyRoiPct = (monthlyNetAfterServer / cap) * 100;
     const annualRoiPct = monthlyRoiPct * 12;
     const serverCostPct = monthlyNetBeforeServer > 0 ? (fixedMonthly / monthlyNetBeforeServer) * 100 : null;
@@ -265,6 +310,12 @@ function projectProfitability({
       annualNet: Number(annualNetAfterServer.toFixed(2)),
       monthlyVolume: Math.round(monthlyVolume),
       monthlyFees: Number(monthlyFees.toFixed(2)),
+      monthlySlippage: Number(monthlySlippage.toFixed(2)),
+      monthlyTransactionCosts: Number(monthlyTransactionCosts.toFixed(2)),
+      monthlyServerCost: Number(serverUsd.toFixed(2)),
+      perTradeProfitable: netDollarTrade > 0,
+      monthlyProfitable: monthlyNetAfterServer > 0,
+      profitableBoth: netDollarTrade > 0 && monthlyNetAfterServer > 0,
       monthlyRoiPct: Number(monthlyRoiPct.toFixed(2)),
       annualRoiPct: Number(annualRoiPct.toFixed(1)),
       serverCostPct: serverCostPct !== null ? Number(serverCostPct.toFixed(1)) : null,
@@ -307,11 +358,22 @@ function projectProfitability({
     warnings.push(`Running ${bots} bots at $${sz} order size ideally needs ~$${recommendedCapital.toLocaleString()} total capital (quote + base inventory across both exchanges) to avoid constant rebalancing.`);
   }
   if (base.serverCostPct !== null && base.serverCostPct > 20) {
-    warnings.push(`Server & rebalance costs ($${fixedMonthly}/mo) consume ${base.serverCostPct}% of pre-server profit. Consider a lower-cost VPS (e.g., Hetzner CPX21 at $10.50/mo) until volume scales.`);
+    warnings.push(`Server & rebalance costs ($${fixedMonthly.toFixed(2)}/mo) consume ${base.serverCostPct}% of pre-server profit. Consider a lower-cost VPS (e.g., Hetzner CPX21 at $10.50/mo) until volume scales.`);
+  }
+  if (!base.profitableBoth) {
+    warnings.push(base.perTradeProfitable
+      ? `Each trade nets $${base.netDollarTrade} after fees and slippage, but monthly profit (${base.monthlyNet < 0 ? '-' : ''}$${Math.abs(base.monthlyNet)}) does not cover server ($${serverUsd.toFixed(2)}) + rebalancing ($${rebalanceUsd.toFixed(2)}). Bots would need manual confirmation to launch.`
+      : `Each trade loses money after transaction costs ($${base.netDollarTrade}/trade). Bots would need manual confirmation to launch.`);
   }
 
   return {
-    inputs: { capital: cap, tradeSize: sz, botsCount: bots, tradesPerDayPerBot: tpdBot, avgGrossSpreadPct: grossPct, feeBuyPct, feeSellPct, slippageBps, captureRatePct, serverMonthlyUsd, rebalanceMonthlyUsd, strategyMode },
+    inputs: { capital: cap, tradeSize: sz, botsCount: bots, tradesPerDayPerBot: tpdBot, avgGrossSpreadPct: grossPct, feeBuyPct, feeSellPct, slippageBps, captureRatePct, serverMonthlyUsd: serverUsd, rebalanceMonthlyUsd: rebalanceUsd, strategyMode },
+    serverCost: { monthlyUsd: serverUsd, source: serverFromInput ? 'input' : 'estimate', estimate: serverEstimate },
+    profitabilityChecks: {
+      perTrade: { pass: base.perTradeProfitable, netDollarTrade: base.netDollarTrade, netPctPerTrade: base.netPctPerTrade, label: 'Per trade after fees + slippage' },
+      monthly: { pass: base.monthlyProfitable, monthlyNet: base.monthlyNet, label: 'Monthly after server + transaction costs' },
+      profitableBoth: base.profitableBoth,
+    },
     breakevenSpreadPct: Number((feeTotalPct + slipPct).toFixed(4)),
     recommendedCapital,
     scenarios: { conservative, base, optimistic },
@@ -424,6 +486,7 @@ module.exports = {
   projectProfitability,
   inspectHostCapacity,
   measureExchangeLatency,
+  estimateServerCost,
   SERVER_CATALOG,
   REGION_GUIDANCE,
 };

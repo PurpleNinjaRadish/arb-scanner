@@ -25,7 +25,7 @@ export default function ProjectionsTab({ seed, activePairId, quote, onOpenAdviso
     feeSellPct: 0.60,
     slippageBps: 8,
     captureRatePct: 70,
-    serverMonthlyUsd: 10.5,
+    serverMonthlyUsd: null, // null = estimated avg server cost for the bot count
     rebalanceMonthlyUsd: 5,
     strategyMode: 'xemm',
   });
@@ -52,10 +52,10 @@ export default function ProjectionsTab({ seed, activePairId, quote, onOpenAdviso
 
   const recalc = useCallback(async (inp) => {
     try {
-      const d = await api('/api/advisor/projections', { method: 'POST', body: inp });
+      const d = await api('/api/advisor/projections', { method: 'POST', body: { ...inp, pairId: activePairId } });
       setProj(d);
     } catch (_) {}
-  }, []);
+  }, [activePairId]);
 
   useEffect(() => {
     const t = setTimeout(() => recalc(inputs), 120);
@@ -85,6 +85,9 @@ export default function ProjectionsTab({ seed, activePairId, quote, onOpenAdviso
 
   const setNum = (k) => (e) => setInputs(p => ({ ...p, [k]: parseFloat(e.target.value) || 0 }));
   const base = proj?.scenarios?.base;
+  const est = proj?.serverCost?.estimate;
+  const usingEstimate = inputs.serverMonthlyUsd === null;
+  const checks = proj?.profitabilityChecks;
 
   return (
     <div>
@@ -117,12 +120,22 @@ export default function ProjectionsTab({ seed, activePairId, quote, onOpenAdviso
           <div><label style={S.lbl}>Sell Leg Fee %</label><input type="number" step="0.02" style={S.inp} value={inputs.feeSellPct} onChange={setNum('feeSellPct')} /></div>
           <div><label style={S.lbl}>Round-Trip Slip (bps)</label><input type="number" step="1" style={S.inp} value={inputs.slippageBps} onChange={setNum('slippageBps')} /></div>
           <div><label style={S.lbl}>Capture Rate %</label><input type="number" min="5" max="100" step="5" style={S.inp} value={inputs.captureRatePct} onChange={setNum('captureRatePct')} /></div>
-          <div><label style={S.lbl}>Server Cost ($/mo)</label><input type="number" step="1" style={S.inp} value={inputs.serverMonthlyUsd} onChange={setNum('serverMonthlyUsd')} /></div>
+          <div>
+            <label style={S.lbl}>Server Cost ($/mo){usingEstimate ? ' · est. avg' : ''}</label>
+            <input type="number" step="1" style={{ ...S.inp, color: usingEstimate ? C.cyan : C.text }}
+              value={usingEstimate ? (proj?.serverCost?.monthlyUsd ?? '') : inputs.serverMonthlyUsd}
+              onChange={setNum('serverMonthlyUsd')} />
+          </div>
           <div><label style={S.lbl}>Rebalance ($/mo)</label><input type="number" step="1" style={S.inp} value={inputs.rebalanceMonthlyUsd} onChange={setNum('rebalanceMonthlyUsd')} /></div>
         </div>
 
         <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center', paddingTop: 10, borderTop: `1px solid ${C.border}` }}>
           <span style={{ fontSize: 10, color: C.muted, textTransform: 'uppercase', letterSpacing: 1 }}>Quick Server Cost:</span>
+          <button className="tbtn" onClick={() => setInputs(x => ({ ...x, serverMonthlyUsd: null }))}
+            title={est ? `${est.method}: ${est.basis.map(b => `${b.name} $${b.monthlyUsd}`).join(', ')}` : ''}
+            style={{ ...(usingEstimate ? S.btn(C.cyan, true) : S.btn(C.cyan)), fontSize: 10, padding: '4px 8px' }}>
+            Est. avg for {inputs.botsCount} bot(s){est ? ` ($${est.avgMonthlyUsd})` : ''}
+          </button>
           {SERVER_PRESETS.map(p => (
             <button key={p.label} className="tbtn" onClick={() => setInputs(x => ({ ...x, serverMonthlyUsd: p.cost }))}
               style={{ ...(inputs.serverMonthlyUsd === p.cost ? S.btn(C.yellow, true) : S.btnMuted), fontSize: 10, padding: '4px 8px' }}>
@@ -132,6 +145,11 @@ export default function ProjectionsTab({ seed, activePairId, quote, onOpenAdviso
         </div>
       </div>
 
+      {usingEstimate && est && (
+        <Notice tone="info">
+          {`Server cost uses the estimated average from Server Suggestions: $${est.avgMonthlyUsd}/mo for ${est.bots} bot(s) ($${est.perBotMonthlyUsd}/bot) — ${est.basis.map(b => `${b.name} $${b.monthlyUsd}`).join(', ')}. Type a value to use your real cost.`}
+        </Notice>
+      )}
       {note && <Notice tone="info">{note}</Notice>}
 
       {proj && (
@@ -139,8 +157,25 @@ export default function ProjectionsTab({ seed, activePairId, quote, onOpenAdviso
           {/* Cost-effectiveness verdict & warnings */}
           {proj.warnings.map((w, i) => <Notice key={i} tone="warn">⚠ {w}</Notice>)}
 
+          {checks && (
+            <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'center', padding: '10px 14px', borderRadius: 8, marginBottom: 14,
+              background: checks.profitableBoth ? '#001c10' : '#24060c', border: `1px solid ${checks.profitableBoth ? C.green : C.red}66` }}>
+              <b style={{ fontSize: 12, color: checks.profitableBoth ? C.green : C.red }}>
+                {checks.profitableBoth ? 'PROFITABLE ON BOTH CALCULATIONS — bots can launch' : 'NOT PROFITABLE ON BOTH — bots will need manual confirmation'}
+              </b>
+              <Badge color={checks.perTrade.pass ? C.green : C.red}>Per trade: {fmtUsd(checks.perTrade.netDollarTrade)} ({checks.perTrade.netPctPerTrade}%)</Badge>
+              <Badge color={checks.monthly.pass ? C.green : C.red}>Monthly: {fmtUsd(checks.monthly.monthlyNet)}</Badge>
+            </div>
+          )}
+
           {base && (
             <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', marginBottom: 14 }}>
+              <MetricCard
+                label="Monthly Costs"
+                value={fmtUsd(base.monthlyTransactionCosts + base.monthlyServerCost)}
+                sub={`Fees ${fmtUsd(base.monthlyFees)} · slippage ${fmtUsd(base.monthlySlippage)} · rebalance ${fmtUsd(inputs.rebalanceMonthlyUsd)} · server ${fmtUsd(base.monthlyServerCost)}`}
+                color={C.yellow}
+              />
               <MetricCard
                 label="Cost-Effectiveness"
                 value={base.costEffective ? 'COST-EFFECTIVE' : base.monthlyNet > 0 ? 'MARGINAL' : 'UNPROFITABLE'}

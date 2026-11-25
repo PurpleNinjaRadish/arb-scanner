@@ -65,17 +65,32 @@ function ContainerInspectModal({ container, target, onClose, onRestarted }) {
     return () => clearInterval(iv);
   }, [loadLogs, loadConfig]);
 
-  const saveAndRestart = async () => {
+  const saveAndRestart = async (override) => {
     if (!configName) return;
     setSaving(true); setMsg('');
     try {
-      await api('/api/instance/edit', {
+      const r = await api('/api/instance/edit', {
         method: 'POST',
-        body: { target, containerId: container.id, configName, yaml },
+        body: { target, containerId: container.id, configName, yaml, override },
       });
-      setMsg('Saved & recreated container!');
+      setMsg(`Saved & recreated container!${r.guard?.overridden ? ' (manual override logged)' : ''}`);
       if (onRestarted) onRestarted();
-    } catch (e) { setMsg(`Error: ${e.message}`); }
+    } catch (e) {
+      const rc = e.status === 409 && e.data && e.data.requiresConfirmation;
+      if (rc) {
+        const reasons = (e.data.reasons || []).slice(0, 3).join('\n');
+        setSaving(false);
+        if (rc.live) {
+          const typed = window.prompt(`Blocked — not verified profitable:\n${reasons}\n\nType ${rc.phrase} to relaunch with real funds anyway (logged):`);
+          if (typed) return saveAndRestart({ confirmed: true, phrase: typed });
+        } else if (window.confirm(`Blocked — not verified profitable:\n${reasons}\n\nRelaunch this paper bot anyway? (logged)`)) {
+          return saveAndRestart({ confirmed: true });
+        }
+        setMsg(`Not relaunched: ${e.message}`);
+        return;
+      }
+      setMsg(`Error: ${e.message}`);
+    }
     finally { setSaving(false); }
   };
 
@@ -128,7 +143,7 @@ function ContainerInspectModal({ container, target, onClose, onRestarted }) {
             style={{ ...S.codeBox, width: '100%', height: 340, color: C.text, resize: 'vertical', marginBottom: 12 }} />
           <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
             <CopyBtn text={yaml} label="Copy YAML" />
-            <button className="tbtn" disabled={saving || !configName} onClick={saveAndRestart} style={S.btn(C.green, true)}>
+            <button className="tbtn" disabled={saving || !configName} onClick={() => saveAndRestart()} style={S.btn(C.green, true)}>
               {saving ? 'Restarting...' : '💾 Save & Restart Container'}
             </button>
           </div>

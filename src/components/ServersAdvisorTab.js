@@ -265,6 +265,23 @@ export default function ServersAdvisorTab({
                 )}
               </div>
             )}
+
+            {rec && rec.estimatedCost && (
+              <div style={{ marginTop: 12, background: '#04101a', border: `1px solid ${C.cyan}55`, borderRadius: 8, padding: 14, display: 'flex', gap: 18, flexWrap: 'wrap', alignItems: 'center' }}>
+                <div>
+                  <div style={{ fontSize: 10, color: C.cyan, letterSpacing: 1.5, textTransform: 'uppercase', marginBottom: 4 }}>Estimated Avg Server Cost · {targetBots} Bot(s)</div>
+                  <div style={{ fontSize: 20, fontWeight: 700, color: '#e2f1ff' }}>
+                    {fmtUsd(rec.estimatedCost.avgMonthlyUsd)}<span style={{ fontSize: 12, color: C.muted }}>/mo</span>
+                    <span style={{ fontSize: 12, color: C.cyan, marginLeft: 10 }}>{fmtUsd(rec.estimatedCost.perBotMonthlyUsd)}/bot</span>
+                  </div>
+                </div>
+                <div style={{ fontSize: 11, color: C.muted, lineHeight: 1.6, flex: 1, minWidth: 260 }}>
+                  {rec.estimatedCost.method}: {rec.estimatedCost.basis.map(b => `${b.name} (${fmtUsd(b.monthlyUsd)})`).join(', ')}.
+                  {' '}Range {fmtUsd(rec.estimatedCost.minMonthlyUsd)}–{fmtUsd(rec.estimatedCost.maxMonthlyUsd)}.
+                  {' '}Used as the server cost in Projections and in the pre-launch check for hosts with no monthly cost entered.
+                </div>
+              </div>
+            )}
           </div>
 
           {/* Live Host Latency & Capacity Benchmark */}
