@@ -16,6 +16,8 @@ const { safeRel, safeName, shq } = require('../lib/hosts');
 const { validateServer, DEFAULT_FEES } = require('../lib/config');
 const { calcBotCapacity, recommendServers, projectProfitability, estimateServerCost } = require('../lib/advisor');
 const guard = require('../lib/guard');
+const tickers = require('../lib/tickers');
+const tickerAudit = require('../lib/tickerAudit');
 const { readKillSwitch } = require('../lib/hummingbot');
 const { generateBootstrapScript, generateComposeFile } = require('../lib/provision');
 const { app } = require('../index');
@@ -428,6 +430,100 @@ function invokeApp(method, urlPath, body) {
       require.cache[hbPath].exports = realHb;
       guard.updateGuardSettings({ autoRecheckEnabled: prevAuto, liveMaxLossUsd: 50 });
     }
+  });
+
+  // ─── Ticker audit (prices captured live from the exchanges on 2026-11-25) ────
+  // bulk(ex, { NATIVE: [usdMid, quote?] }) builds a parsed bulk the way exchanges.js does
+  const mkBulk = (ex, coins) => {
+    const out = { USD: {}, USDC: {}, USDT: {} };
+    for (const [nat, [m, q = 'USD']] of Object.entries(coins)) {
+      const can = tickers.canonical(ex, nat);
+      out[q][can] = { bid: m * 0.9995, ask: m * 1.0005, last: m, native: nat, book: true };
+    }
+    return out;
+  };
+  const liveBulks = {
+    kraken: mkBulk('kraken', { BTC: [59903], LUNA: [0.00004538], ONE: [0.1204], EDGE: [0.07134], EDGEX: [0.271], LIT: [0.0857], LIGHTER: [2.386], AI: [0.01643], INIT: [0.05945], SUP: [0.00015], EUR: [1.0976], GMT: [0.00516], SOL: [70.19] }),
+    coinbase: mkBulk('coinbase', { BTC: [59950], EDGE: [0.07133], EDGEX: [0.27], LIT: [0.0857], LIGHTER: [2.386], AI: [0.01645], SUP: [0.002451], GMT: [0.005195], SOL: [70.2] }),
+    okx: mkBulk('okx', { BTC: [59960, 'USDT'], EDGE: [0.271, 'USDT'], LIT: [2.384, 'USDT'], LUNA: [0.03167, 'USDT'], ONE: [0.000951, 'USDT'], AI: [0.01645, 'USDT'], GMT: [0.005083, 'USDT'], SOL: [70.25, 'USDT'] }),
+    kucoin: mkBulk('kucoin', { BTC: [59956, 'USDT'], EDGE: [0.2717, 'USDT'], LIT: [2.385, 'USDT'], LUNA: [0.0317, 'USDT'], LUNC: [0.0000443, 'USDT'], ONE: [0.0009515, 'USDT'], INIT: [0.0833, 'USDT'], GMT: [0.00513, 'USDT'], SOL: [70.255, 'USDT'] }),
+    binance: mkBulk('binance', { BTC: [59940, 'USDT'], LUNC: [0.00004418, 'USDT'], AI: [0.01275, 'USDT'], INIT: [0.08582, 'USDT'], GMT: [0.005065, 'USDT'] }),
+  };
+  // KuCoin's GMT-USDC market was stale (0.01721 vs 0.00513 on USDT)
+  liveBulks.kucoin.USDC.GMT = { bid: 0.0172, ask: 0.01722, last: 0.01721, native: 'GMT', book: true };
+
+  await test('tickers: renamed coins map to one canonical ticker and back to each exchange\'s own', () => {
+    assert.strictEqual(tickers.canonical('kraken', 'XBT'), 'BTC');
+    assert.strictEqual(tickers.canonical('kraken', 'LUNA'), 'LUNC');
+    assert.strictEqual(tickers.canonical('okx', 'LIT'), 'LIGHTER');
+    assert.strictEqual(tickers.canonical('coinbase', 'LIT'), 'LIT', 'Coinbase LIT is Litentry, not Lighter');
+    assert.strictEqual(tickers.nativeSymbol('kucoin', 'EDGEX'), 'EDGE');
+    assert.strictEqual(tickers.nativeSymbol('kraken', 'LUNC'), 'LUNA');
+    assert.strictEqual(tickers.hbSymbol('kraken', 'BTC'), 'BTC', "Hummingbot's Kraken connector already shows XBT as BTC");
+    assert.strictEqual(tickers.hbSymbol('okx', 'LIGHTER'), 'LIT');
+    const y = generateStrategyYaml({ strategy: 'amm_arb', symbol: 'LIGHTER', quote: 'USDT', exA: 'kraken', exB: 'okx', tradeSizeUsd: 100, refPrice: 2.4, minProfitabilityPct: 0.5, paperTrade: true });
+    const doc = parseStrategyYaml(y).doc;
+    assert.strictEqual(doc.market_1, 'LIGHTER-USDT');
+    assert.strictEqual(doc.market_2, 'LIT-USDT');
+    const x = parseStrategyYaml(generateStrategyYaml({ strategy: 'xemm', symbol: 'EDGEX', quote: 'USDT', makerEx: 'kucoin', takerEx: 'kraken', tradeSizeUsd: 100, refPrice: 0.27, paperTrade: true })).doc;
+    assert.strictEqual(x.maker_market_trading_pair, 'EDGE-USDT');
+    assert.strictEqual(x.taker_market_trading_pair, 'EDGEX-USDT');
+    assert.strictEqual(guard.describeStrategy(parseStrategyYaml(generateStrategyYaml({ strategy: 'amm_arb', symbol: 'LIGHTER', quote: 'USDT', exA: 'okx', exB: 'kraken', tradeSizeUsd: 100, refPrice: 2.4, minProfitabilityPct: 0.5, paperTrade: true }))).symbol, 'LIGHTER');
+  });
+
+  await test('ticker audit: real same-ticker/different-coin cases are flagged, renames line up', () => {
+    const a = tickerAudit.evaluateAudit(liveBulks);
+    const st = (sym, ex) => (a.symbols.find(s => s.symbol === sym) || { listings: {} }).listings[ex]?.status;
+    // Renames now compare the same coin
+    for (const ex of ['kraken', 'coinbase', 'okx', 'kucoin']) assert.strictEqual(st('EDGEX', ex), 'ok', `EDGEX on ${ex}`);
+    for (const ex of ['kraken', 'coinbase', 'okx', 'kucoin']) assert.strictEqual(st('LIGHTER', ex), 'ok', `LIGHTER on ${ex}`);
+    for (const ex of ['kraken', 'kucoin', 'binance']) assert.strictEqual(st('LUNC', ex), 'ok', `LUNC on ${ex}`);
+    assert.strictEqual(st('LUNA', 'okx'), 'ok', 'Terra 2.0 (OKX, KuCoin) no longer collides with Kraken Terra Classic');
+    assert.strictEqual(st('LUNA', 'kraken'), undefined, 'Kraken Terra Classic is filed under LUNC');
+    // Different coins sharing a ticker
+    assert.strictEqual(st('ONE', 'kraken'), 'collision');
+    assert.strictEqual(st('ONE', 'okx'), 'ok');
+    assert.strictEqual(st('AI', 'binance'), 'collision');
+    assert.strictEqual(st('INIT', 'kraken'), 'collision');
+    assert.strictEqual(st('SUP', 'kraken'), 'collision');
+    assert.strictEqual(st('SUP', 'coinbase'), 'single', "Coinbase's real SUP isn't penalised by Kraken's different SUP");
+    assert.deepStrictEqual(a.flagged.find(f => f.symbol === 'ONE' && f.exchange === 'kraken').badQuotes, [], 'no redundant stale-quote note on excluded coins');
+    // Stale quote market on an otherwise fine listing
+    assert.strictEqual(st('GMT', 'kucoin'), 'bad_quote');
+    const gmt = a.flagged.find(f => f.symbol === 'GMT' && f.exchange === 'kucoin');
+    assert.deepStrictEqual(gmt.badQuotes, ['USDC']);
+    assert.strictEqual(st('EUR', 'kraken'), 'fiat');
+    for (const ex of ['kraken', 'coinbase', 'okx', 'kucoin', 'binance']) assert.strictEqual(st('BTC', ex), 'ok');
+  });
+
+  await test('ticker audit: unknown collisions are caught by price alone', () => {
+    const b = {
+      kraken: mkBulk('kraken', { ZZZ: [1.0] }), coinbase: mkBulk('coinbase', { ZZZ: [1.01] }),
+      okx: mkBulk('okx', { ZZZ: [3.5, 'USDT'] }), kucoin: mkBulk('kucoin', { ZZZ: [0.99, 'USDT'], YYY: [2, 'USDT'] }),
+      binance: mkBulk('binance', { YYY: [5, 'USDT'] }),
+    };
+    const a = tickerAudit.evaluateAudit(b);
+    const z = a.symbols.find(s => s.symbol === 'ZZZ');
+    assert.strictEqual(z.listings.okx.status, 'mismatch');
+    assert.strictEqual(z.listings.kraken.status, 'ok');
+    const y = a.symbols.find(s => s.symbol === 'YYY');
+    assert.strictEqual(y.listings.kucoin.status, 'conflict', 'two sources disagreeing: both flagged');
+    assert.strictEqual(y.listings.binance.status, 'conflict');
+  });
+
+  await test('scanner: flagged tickers are excluded from results (never alert or deploy)', async () => {
+    tickerAudit._setCacheForTests(tickerAudit.evaluateAudit(liveBulks));
+    const { blockedReason } = tickerAudit;
+    assert.ok(blockedReason('kraken', 'ONE', 'USD'));
+    assert.ok(!blockedReason('okx', 'ONE', 'USDT'));
+    assert.ok(blockedReason('kucoin', 'GMT', 'USDC'), 'stale USDC market blocked');
+    assert.ok(!blockedReason('kucoin', 'GMT', 'USDT'), 'USDT market on the same coin still fine');
+    assert.ok(blockedReason('kraken', 'EUR', 'USD'), 'fiat never scanned as crypto');
+    assert.ok(!blockedReason('kraken', 'BTC', 'USD'));
+    const chk = guard.evaluateCrossCheck({ ...baseCheck, tickerBlocks: [blockedReason('kraken', 'ONE', 'USD')].filter(Boolean), venues: { kraken: venue(150), coinbase: venue(153.5) } });
+    assert.strictEqual(chk.checks.find(c => c.id === 'ticker').status, 'fail');
+    assert.ok(!chk.allowed);
+    tickerAudit._setCacheForTests(null);
   });
 
   console.log(`\nCompleted: ${passed} test(s) passed.\n`);

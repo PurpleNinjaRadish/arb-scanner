@@ -19,6 +19,7 @@ const provision = require('./lib/provision');
 const { alertManager } = require('./lib/alerts');
 const portfolio = require('./lib/portfolio');
 const guard = require('./lib/guard');
+const tickerAudit = require('./lib/tickerAudit');
 
 const app = express();
 
@@ -430,6 +431,13 @@ app.post('/api/crosscheck', wrap(async (req, res) => {
     minProfitabilityPct: b.minProfitabilityPct != null && b.minProfitabilityPct !== '' ? Number(b.minProfitabilityPct) : null,
     scannerNetPct: b.scannerNetPct != null && b.scannerNetPct !== '' ? Number(b.scannerNetPct) : null,
   }));
+}));
+
+// Full ticker audit across all exchanges (cached 30 min; ?refresh=1 forces a new run)
+app.get('/api/tickers/audit', wrap(async (req, res) => {
+  const a = await tickerAudit.runTickerAudit({ force: req.query.refresh === '1' });
+  const full = req.query.full === '1';
+  res.json(full ? a : { ...a, symbols: undefined });
 }));
 
 app.get('/api/crosscheck/history', (req, res) => res.json({ history: guard.history }));

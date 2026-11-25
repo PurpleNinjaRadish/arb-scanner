@@ -9,6 +9,13 @@
 //     (e.g. `0.5` means 0.5%, `1.0` means 1.0%) — NOT a decimal fraction.
 const yaml = require('js-yaml');
 const { EXCHANGES } = require('./exchanges');
+const { hbSymbol, canonical } = require('./tickers');
+
+// Each connector gets the pair as THAT exchange names it (e.g. Lighter is
+// LIGHTER-USD on Kraken but LIT-USDT on OKX).
+function hbPair(exKey, symbol, quote) {
+  return `${hbSymbol(exKey, symbol)}-${String(quote).toUpperCase()}`;
+}
 
 function hbConnectorName(exKey, paperTrade = false) {
   const base = (EXCHANGES[exKey] && EXCHANGES[exKey].hbConnector) || exKey;
@@ -35,6 +42,8 @@ function buildAmmArbYaml({
   const c1 = hbConnectorName(exA, paperTrade);
   const c2 = hbConnectorName(exB, paperTrade);
   const pair = `${symbol.toUpperCase()}-${quote.toUpperCase()}`;
+  const pair1 = hbPair(exA, symbol, quote);
+  const pair2 = hbPair(exB, symbol, quote);
   const baseAmt = orderAmountBase > 0 ? Number(orderAmountBase) : formatBaseAmount(tradeSizeUsd || 500, refPrice);
   const minProf = Number(Math.max(Number(minProfitabilityPct) || 0.1, -10).toFixed(4));
   const slipBuf = Number(Math.max(Number(slippageBufferPct) || 0, 0).toFixed(4));
@@ -42,9 +51,9 @@ function buildAmmArbYaml({
   const doc = {
     strategy: 'amm_arb',
     connector_1: c1,
-    market_1: pair,
+    market_1: pair1,
     connector_2: c2,
-    market_2: pair,
+    market_2: pair2,
     pool_id: '',
     order_amount: baseAmt,
     min_profitability: minProf,
@@ -59,7 +68,7 @@ function buildAmmArbYaml({
 
   const header = [
     `# Hummingbot Cross-Exchange Arbitrage (amm_arb) — ARB SCANNER v3`,
-    `# Pair: ${pair} | ${c1} <-> ${c2}`,
+    `# Pair: ${pair} | ${c1} (${pair1}) <-> ${c2} (${pair2})`,
     `# Mode: ${paperTrade ? 'PAPER TRADE (simulated)' : 'LIVE TRADING (real funds)'}`,
     `# Order Size: ${baseAmt} ${symbol.toUpperCase()}${refPrice ? ` (~$${(baseAmt * refPrice).toFixed(2)} ${quote} @ $${refPrice})` : ''}`,
     `# Min Profitability: ${minProf}% (percentage points) | Slippage Buffer: ${slipBuf}%`,
@@ -86,6 +95,8 @@ function buildXemmYaml({
   const mEx = hbConnectorName(makerEx, paperTrade);
   const tEx = hbConnectorName(takerEx, paperTrade);
   const pair = `${symbol.toUpperCase()}-${quote.toUpperCase()}`;
+  const makerPair = hbPair(makerEx, symbol, quote);
+  const takerPair = hbPair(takerEx, symbol, quote);
   const baseAmt = orderAmountBase > 0 ? Number(orderAmountBase) : formatBaseAmount(tradeSizeUsd || 500, refPrice);
   const minProf = Number(Math.max(Number(minProfitabilityPct) || 0.1, -10).toFixed(4));
 
@@ -93,8 +104,8 @@ function buildXemmYaml({
     strategy: 'cross_exchange_market_making',
     maker_market: mEx,
     taker_market: tEx,
-    maker_market_trading_pair: pair,
-    taker_market_trading_pair: pair,
+    maker_market_trading_pair: makerPair,
+    taker_market_trading_pair: takerPair,
     min_profitability: minProf,
     order_amount: baseAmt,
     adjust_order_enabled: !!adjustOrderEnabled,
@@ -118,7 +129,7 @@ function buildXemmYaml({
 
   const header = [
     `# Hummingbot Cross-Exchange Market Making (XEMM) — ARB SCANNER v3`,
-    `# Pair: ${pair} | Maker: ${mEx} -> Taker Hedge: ${tEx}`,
+    `# Pair: ${pair} | Maker: ${mEx} (${makerPair}) -> Taker Hedge: ${tEx} (${takerPair})`,
     `# Mode: ${paperTrade ? 'PAPER TRADE (simulated)' : 'LIVE TRADING (real funds)'}`,
     `# Order Size: ${baseAmt} ${symbol.toUpperCase()}${refPrice ? ` (~$${(baseAmt * refPrice).toFixed(2)} ${quote} @ $${refPrice})` : ''}`,
     `# Min Profitability: ${minProf}% (percentage points)`,
@@ -185,6 +196,7 @@ function parseStrategyYaml(raw) {
 
 module.exports = {
   hbConnectorName,
+  hbPair,
   formatBaseAmount,
   buildAmmArbYaml,
   buildXemmYaml,

@@ -20,6 +20,8 @@ const { summarizeStats } = require('./scanner');
 const { estimateServerCost } = require('./advisor');
 const { parseStrategyYaml } = require('./strategies');
 const { loadConfig, updateConfig, DEFAULT_GUARD } = require('./config');
+const { canonical } = require('./tickers');
+const { blockedReason } = require('./tickerAudit');
 
 const DATA_DIR = process.env.ARB_DATA_DIR || path.join(__dirname, '..', 'data');
 const AUDIT_FILE = path.join(DATA_DIR, 'guard_audit.json');
@@ -59,6 +61,10 @@ function evaluateCrossCheck(input) {
   const g = { ...DEFAULT_GUARD, ...(input.guard || {}) };
   const checks = [];
   const add = (id, label, status, detail) => checks.push({ id, label, status, detail });
+  if (Array.isArray(input.tickerBlocks)) {
+    add('ticker', 'Ticker is the same coin on both exchanges', input.tickerBlocks.length ? 'fail' : 'pass',
+      input.tickerBlocks.length ? input.tickerBlocks.join(' · ') : 'Passed the cross-exchange ticker audit');
+  }
   const slip = (Number(g.slippageBps) || 0) / 10000;
 
   // Prices per venue
@@ -374,6 +380,7 @@ async function runCrossCheck({
     venues: { [exA]: va, [exB]: vb },
     references, stats: statsForCoin(exA, exB, q, sym), server,
     minProfitabilityPct, scannerNetPct,
+    tickerBlocks: [blockedReason(exA, sym, q), blockedReason(exB, sym, q)].filter(Boolean),
   });
   result.target = target;
   if (record) {
@@ -410,12 +417,14 @@ function describeStrategy(parsed) {
   const isXemm = parsed.strategy === 'cross_exchange_market_making';
   const [c1, c2] = isXemm ? [doc.maker_market, doc.taker_market] : [doc.connector_1, doc.connector_2];
   const [symbol, quote] = String(parsed.pair || '').split('-');
+  const exA = exchangeFromConnector(c1);
   return {
     strategy: parsed.strategy,
     supported: parsed.strategy === 'amm_arb' || isXemm,
-    exA: exchangeFromConnector(c1),
+    exA,
     exB: exchangeFromConnector(c2),
-    symbol: (symbol || '').toUpperCase(),
+    // market_1 is named the way connector 1's exchange names it; compare on the canonical ticker
+    symbol: exA ? canonical(exA, symbol || '') : (symbol || '').toUpperCase(),
     quote: (quote || '').toUpperCase(),
     baseAmount: Number(parsed.orderAmount) || 0,
     minProfitabilityPct: parsed.minProfitability != null ? Number(parsed.minProfitability) : null,

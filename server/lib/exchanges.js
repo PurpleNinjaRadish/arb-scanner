@@ -3,6 +3,7 @@
 //   book=true  → bid/ask are real top-of-book prices
 //   book=false → only a last-trade price is known (refineQuotes() can upgrade it)
 const axios = require('axios');
+const { canonical, nativeSymbol } = require('./tickers');
 
 const http = axios.create({ timeout: 8000, headers: { 'User-Agent': 'arb-scanner/3.0' } });
 const QUOTES = ['USD', 'USDT', 'USDC'];
@@ -12,10 +13,17 @@ const health = {}; // exchange -> { ok, latencyMs, error, at }
 
 function num(x) { const n = parseFloat(x); return Number.isFinite(n) && n > 0 ? n : null; }
 function emptyQuotes() { return Object.fromEntries(QUOTES.map(q => [q, {}])); }
-function put(out, quote, coin, q) {
+// Store a listing under its canonical ticker (see tickers.js). If an exchange lists
+// a coin natively under a name another of its tickers is aliased to, the native
+// listing wins and the aliased one is dropped rather than overwriting it.
+function put(out, quote, coin, q, ex) {
   if (!out[quote] || !coin) return;
   if (!q.bid && !q.ask && !q.last) return;
-  out[quote][coin] = q;
+  const nat = String(coin).toUpperCase();
+  const can = ex ? canonical(ex, nat) : nat;
+  const prev = out[quote][can];
+  if (prev && prev.native === can && nat !== can) return;
+  out[quote][can] = { ...q, native: nat };
 }
 // Split a concatenated symbol (BTCUSDT) using the known quote list (longest first)
 function splitConcat(sym) {
@@ -24,7 +32,6 @@ function splitConcat(sym) {
 }
 
 // ─── Kraken ──────────────────────────────────────────────────────────────────
-const KRAKEN_ALIASES = { XBT: 'BTC', XDG: 'DOGE' };
 let krakenPairs = null, krakenPairsAt = 0; // pairId -> {coin, quote}; and reverse
 async function krakenPairMap() {
   if (krakenPairs && Date.now() - krakenPairsAt < 3600e3) return krakenPairs;
@@ -34,9 +41,10 @@ async function krakenPairMap() {
   for (const [id, p] of Object.entries(r.data.result || {})) {
     if (!p.wsname || (p.status && p.status !== 'online')) continue;
     let [b, q] = p.wsname.split('/');
-    b = KRAKEN_ALIASES[b] || b; q = KRAKEN_ALIASES[q] || q;
+    const nativeBase = b;
+    b = canonical('kraken', b); q = canonical('kraken', q);
     if (!QUOTES.includes(q)) continue;
-    byId[id] = { coin: b, quote: q };
+    byId[id] = { coin: b, native: nativeBase, quote: q };
     byCoin[`${b}-${q}`] = id;
   }
   krakenPairs = { byId, byCoin }; krakenPairsAt = Date.now();
@@ -50,7 +58,7 @@ async function krakenBulk() {
   for (const [id, t] of Object.entries(r.data.result || {})) {
     const m = byId[id]; if (!m) continue;
     const vwap = num(t.p && t.p[1]), vol = num(t.v && t.v[1]);
-    put(out, m.quote, m.coin, { bid: num(t.b[0]), ask: num(t.a[0]), last: num(t.c[0]), volQuote: vwap && vol ? vwap * vol : null, book: true });
+    put(out, m.quote, m.native, { bid: num(t.b[0]), ask: num(t.a[0]), last: num(t.c[0]), volQuote: vwap && vol ? vwap * vol : null, book: true }, 'kraken');
   }
   return out;
 }
@@ -74,13 +82,13 @@ async function coinbaseBulk() {
     const quote = p.quote_currency_id || (p.product_id || '').split('-')[1];
     const last = num(p.price);
     const volQuote = num(p.approximate_quote_24h_volume) || (num(p.volume_24h) && last ? num(p.volume_24h) * last : null);
-    put(out, quote, coin, { bid: null, ask: null, last, volQuote, book: false });
+    put(out, quote, coin, { bid: null, ask: null, last, volQuote, book: false }, 'coinbase');
   }
   return out;
 }
 const cbTickerCache = new Map(); // product -> {at, bid, ask}
 async function coinbaseTicker(coin, quote) {
-  const id = `${coin}-${quote}`;
+  const id = `${nativeSymbol('coinbase', coin)}-${quote}`;
   const c = cbTickerCache.get(id);
   if (c && Date.now() - c.at < 3000) return c;
   const r = await http.get(`${CB}/products/${encodeURIComponent(id)}/ticker`, { params: { limit: 1 } });
@@ -89,27 +97,27 @@ async function coinbaseTicker(coin, quote) {
   return v;
 }
 async function coinbaseBook(coin, quote) {
-  const r = await http.get(`${CB}/product_book`, { params: { product_id: `${coin}-${quote}`, limit: 100 } });
+  const r = await http.get(`${CB}/product_book`, { params: { product_id: `${nativeSymbol('coinbase', coin)}-${quote}`, limit: 100 } });
   const pb = r.data.pricebook || {};
   return { bids: (pb.bids || []).map(l => [+l.price, +l.size]), asks: (pb.asks || []).map(l => [+l.price, +l.size]) };
 }
 
 // ─── Binance / Binance.US ────────────────────────────────────────────────────
-function binanceBulk(base) {
+function binanceBulk(base, ex) {
   return async () => {
     const r = await http.get(`${base}/api/v3/ticker/bookTicker`);
     const out = emptyQuotes();
     for (const t of r.data || []) {
       const [coin, quote] = splitConcat(t.symbol); if (!coin) continue;
       const bid = num(t.bidPrice), ask = num(t.askPrice);
-      put(out, quote, coin, { bid, ask, last: bid && ask ? (bid + ask) / 2 : null, volQuote: null, book: true });
+      put(out, quote, coin, { bid, ask, last: bid && ask ? (bid + ask) / 2 : null, volQuote: null, book: true }, ex);
     }
     return out;
   };
 }
-function binanceBook(base) {
+function binanceBook(base, ex) {
   return async (coin, quote) => {
-    const r = await http.get(`${base}/api/v3/depth`, { params: { symbol: `${coin}${quote}`, limit: 100 } });
+    const r = await http.get(`${base}/api/v3/depth`, { params: { symbol: `${nativeSymbol(ex, coin)}${quote}`, limit: 100 } });
     return { bids: r.data.bids.map(l => [+l[0], +l[1]]), asks: r.data.asks.map(l => [+l[0], +l[1]]) };
   };
 }
@@ -120,12 +128,12 @@ async function kucoinBulk() {
   const out = emptyQuotes();
   for (const t of (r.data.data && r.data.data.ticker) || []) {
     const [coin, quote] = t.symbol.split('-');
-    put(out, quote, coin, { bid: num(t.buy), ask: num(t.sell), last: num(t.last), volQuote: num(t.volValue), book: true });
+    put(out, quote, coin, { bid: num(t.buy), ask: num(t.sell), last: num(t.last), volQuote: num(t.volValue), book: true }, 'kucoin');
   }
   return out;
 }
 async function kucoinBook(coin, quote) {
-  const r = await http.get('https://api.kucoin.com/api/v1/market/orderbook/level2_100', { params: { symbol: `${coin}-${quote}` } });
+  const r = await http.get('https://api.kucoin.com/api/v1/market/orderbook/level2_100', { params: { symbol: `${nativeSymbol('kucoin', coin)}-${quote}` } });
   const d = r.data.data || {};
   return { bids: (d.bids || []).map(l => [+l[0], +l[1]]), asks: (d.asks || []).map(l => [+l[0], +l[1]]) };
 }
@@ -134,12 +142,12 @@ async function bybitBulk() {
   const out = emptyQuotes();
   for (const t of (r.data.result && r.data.result.list) || []) {
     const [coin, quote] = splitConcat(t.symbol); if (!coin) continue;
-    put(out, quote, coin, { bid: num(t.bid1Price), ask: num(t.ask1Price), last: num(t.lastPrice), volQuote: num(t.turnover24h), book: true });
+    put(out, quote, coin, { bid: num(t.bid1Price), ask: num(t.ask1Price), last: num(t.lastPrice), volQuote: num(t.turnover24h), book: true }, 'bybit');
   }
   return out;
 }
 async function bybitBook(coin, quote) {
-  const r = await http.get('https://api.bybit.com/v5/market/orderbook', { params: { category: 'spot', symbol: `${coin}${quote}`, limit: 50 } });
+  const r = await http.get('https://api.bybit.com/v5/market/orderbook', { params: { category: 'spot', symbol: `${nativeSymbol('bybit', coin)}${quote}`, limit: 50 } });
   const d = r.data.result || {};
   return { bids: (d.b || []).map(l => [+l[0], +l[1]]), asks: (d.a || []).map(l => [+l[0], +l[1]]) };
 }
@@ -148,12 +156,12 @@ async function okxBulk() {
   const out = emptyQuotes();
   for (const t of r.data.data || []) {
     const [coin, quote] = t.instId.split('-');
-    put(out, quote, coin, { bid: num(t.bidPx), ask: num(t.askPx), last: num(t.last), volQuote: num(t.volCcy24h), book: true });
+    put(out, quote, coin, { bid: num(t.bidPx), ask: num(t.askPx), last: num(t.last), volQuote: num(t.volCcy24h), book: true }, 'okx');
   }
   return out;
 }
 async function okxBook(coin, quote) {
-  const r = await http.get('https://www.okx.com/api/v5/market/books', { params: { instId: `${coin}-${quote}`, sz: 100 } });
+  const r = await http.get('https://www.okx.com/api/v5/market/books', { params: { instId: `${nativeSymbol('okx', coin)}-${quote}`, sz: 100 } });
   const d = (r.data.data && r.data.data[0]) || {};
   return { bids: (d.bids || []).map(l => [+l[0], +l[1]]), asks: (d.asks || []).map(l => [+l[0], +l[1]]) };
 }
@@ -162,8 +170,8 @@ async function okxBook(coin, quote) {
 const EXCHANGES = {
   kraken:    { label: 'Kraken',       hbConnector: 'kraken',                  bulk: krakenBulk,   book: krakenBook,   timeUrl: 'https://api.kraken.com/0/public/Time' },
   coinbase:  { label: 'Coinbase Adv', hbConnector: 'coinbase_advanced_trade', bulk: coinbaseBulk, book: coinbaseBook, timeUrl: 'https://api.coinbase.com/api/v3/brokerage/time' },
-  binance:   { label: 'Binance',      hbConnector: 'binance',                 bulk: binanceBulk('https://api.binance.com'), book: binanceBook('https://api.binance.com'), timeUrl: 'https://api.binance.com/api/v3/time' },
-  binanceus: { label: 'Binance.US',   hbConnector: 'binance_us',              bulk: binanceBulk('https://api.binance.us'),  book: binanceBook('https://api.binance.us'),  timeUrl: 'https://api.binance.us/api/v3/time' },
+  binance:   { label: 'Binance',      hbConnector: 'binance',                 bulk: binanceBulk('https://api.binance.com', 'binance'), book: binanceBook('https://api.binance.com', 'binance'), timeUrl: 'https://api.binance.com/api/v3/time' },
+  binanceus: { label: 'Binance.US',   hbConnector: 'binance_us',              bulk: binanceBulk('https://api.binance.us', 'binanceus'),  book: binanceBook('https://api.binance.us', 'binanceus'),  timeUrl: 'https://api.binance.us/api/v3/time' },
   kucoin:    { label: 'KuCoin',       hbConnector: 'kucoin',                  bulk: kucoinBulk,   book: kucoinBook,   timeUrl: 'https://api.kucoin.com/api/v1/timestamp' },
   bybit:     { label: 'Bybit',        hbConnector: 'bybit',                   bulk: bybitBulk,    book: bybitBook,    timeUrl: 'https://api.bybit.com/v5/market/time' },
   okx:       { label: 'OKX',          hbConnector: 'okx',                     bulk: okxBulk,      book: okxBook,      timeUrl: 'https://www.okx.com/api/v5/public/time' },
@@ -236,4 +244,8 @@ function vwapFill(levels, baseAmount) {
   return { avgPrice: filled > 0 ? cost / filled : null, filled, complete: remaining <= 1e-12, levelsUsed: used, worstPrice: used ? levels[used - 1][0] : null };
 }
 
-module.exports = { EXCHANGES, QUOTES, getQuotes, refineQuotes, getOrderBook, vwapFill, health, getBulk };
+// Binance's public market-data mirror answers where api.binance.com is geo-blocked.
+// Used only as a price reference for the ticker audit, never for trading.
+const binanceMirrorBulk = binanceBulk('https://data-api.binance.vision', 'binance');
+
+module.exports = { EXCHANGES, QUOTES, getQuotes, refineQuotes, getOrderBook, vwapFill, health, getBulk, binanceMirrorBulk };

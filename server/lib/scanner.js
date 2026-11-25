@@ -4,6 +4,7 @@
 const fs = require('fs');
 const path = require('path');
 const { getQuotes, refineQuotes, health, EXCHANGES } = require('./exchanges');
+const { blockedReason } = require('./tickerAudit');
 
 const DATA_DIR = process.env.ARB_DATA_DIR || path.join(__dirname, '..', 'data');
 const STATS_FILE = path.join(DATA_DIR, 'opportunity_stats.json');
@@ -75,6 +76,13 @@ async function runScan({ exA, exB, quote = 'USD', coins = null, tradeSize = 1000
     const set = new Set(needRefine);
     opps = opps.map(o => set.has(o.symbol) ? (evaluate(o.symbol, qa[o.symbol], qb[o.symbol], exA, exB, fees, tradeSize, slippageBps) || o) : o);
   }
+  // Never compare a ticker that is a different coin (or a dead market) on one side
+  const excluded = [];
+  opps = opps.filter(o => {
+    const reason = blockedReason(exA, o.symbol, quote) || blockedReason(exB, o.symbol, quote);
+    if (reason) excluded.push({ symbol: o.symbol, reason, wouldBeNetPct: Number(o.netProfit.toFixed(3)) });
+    return !reason;
+  });
   opps.sort((x, y) => y.netProfit - x.netProfit);
 
   const timestamp = Date.now();
@@ -87,6 +95,7 @@ async function runScan({ exA, exB, quote = 'USD', coins = null, tradeSize = 1000
       coinsAvailable: { [exA]: Object.keys(qa).length, [exB]: Object.keys(qb).length, common: common.length },
       coinsMatched: opps.length,
       refined: needRefine.length,
+      excluded,
       errors: { [exA]: ra.error, [exB]: rb.error },
       health: { [exA]: health[exA] || null, [exB]: health[exB] || null },
     },

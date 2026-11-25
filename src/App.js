@@ -12,6 +12,7 @@ import AlertsTab from './components/AlertsTab';
 import PortfolioTab from './components/PortfolioTab';
 import DeployModal from './components/DeployModal';
 import CrossCheckTab from './components/CrossCheckTab';
+import TickerAuditTab from './components/TickerAuditTab';
 
 const NAV = [
   ['scanner',     '📡 Scanner'],
@@ -20,6 +21,7 @@ const NAV = [
   ['hummingbot',  '🐳 Hummingbot'],
   ['paper',       '🧪 Paper Lab'],
   ['crosscheck',  '🛡 Cross-Check'],
+  ['tickers',     '🔤 Ticker Audit'],
   ['projections', '📈 Projections'],
   ['servers',     '☁ Servers'],
 ];
@@ -378,6 +380,8 @@ export default function App() {
             selectedHost={selectedHost}
           />
         )}
+
+        {tab === 'tickers' && <TickerAuditTab />}
 
         {tab === 'projections' && (
           <ProjectionsTab

@@ -291,6 +291,11 @@ export default function ScannerTab({
         <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', marginBottom: 14 }}>
           <MetricCard label="Overlapping Pairs" value={meta.coinsMatched} sub={`${EXCHANGES[activePair.a]?.short}: ${meta.coinsAvailable?.[activePair.a] || 0} · ${EXCHANGES[activePair.b]?.short}: ${meta.coinsAvailable?.[activePair.b] || 0} (${quote})`} />
           <MetricCard label="Book Refined" value={`${meta.refined || 0} top`} sub="Live Ask/Bid verified" color={C.cyan} />
+          {meta.excluded && meta.excluded.length > 0 && (
+            <MetricCard label="Tickers Excluded" value={meta.excluded.length}
+              sub={`${meta.excluded.slice(0, 4).map(x => x.symbol).join(', ')}${meta.excluded.length > 4 ? '…' : ''} — see 🔤 Ticker Audit`}
+              color={C.yellow} />
+          )}
           <MetricCard label="Viable Net > 0" value={viableCount} color={viableCount > 0 ? C.green : C.muted} />
           <MetricCard label="Best Net %" value={`${bestNet >= 0 ? '+' : ''}${bestNet.toFixed(3)}%`} sub={`Break-even ~${opps[0]?.breakevenPct.toFixed(2) || '—'}%`} color={bestNet > 0 ? C.green : C.yellow} />
           <MetricCard label={`Best Net (${fmtUsd(tradeSize, 0)})`} value={`${bestDollar >= 0 ? '+' : ''}${fmtUsd(bestDollar)}`} color={bestDollar > 0 ? C.green : C.red} />
