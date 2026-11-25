@@ -31,6 +31,9 @@ jobs:
 
       - name: Set up Android SDK & accept licenses
         uses: android-actions/setup-android@v3
+        with:
+          # Default also installs the long-removed 'tools' package, which fails on current runners
+          packages: platform-tools
 
       - name: Install Android 35 platform & build tools
         run: |
