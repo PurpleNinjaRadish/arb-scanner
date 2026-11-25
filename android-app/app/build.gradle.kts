@@ -16,8 +16,28 @@ android {
         versionName = "3.0.0"
     }
 
+    // Fixed signing key (from GitHub secrets in CI) so every new APK installs as an
+    // update over the previous one. Local builds without these env vars fall back
+    // to the standard Android debug key.
+    val keystorePath = System.getenv("ANDROID_KEYSTORE_FILE")
+    val hasFixedKey = !keystorePath.isNullOrBlank() && file(keystorePath).exists()
+    signingConfigs {
+        if (hasFixedKey) {
+            create("fixed") {
+                storeFile = file(keystorePath!!)
+                storePassword = System.getenv("ANDROID_KEYSTORE_PASSWORD")
+                keyAlias = System.getenv("ANDROID_KEY_ALIAS")
+                keyPassword = System.getenv("ANDROID_KEYSTORE_PASSWORD")
+            }
+        }
+    }
+
     buildTypes {
+        debug {
+            if (hasFixedKey) signingConfig = signingConfigs.getByName("fixed")
+        }
         release {
+            if (hasFixedKey) signingConfig = signingConfigs.getByName("fixed")
             isMinifyEnabled = false
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
