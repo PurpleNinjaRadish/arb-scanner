@@ -454,7 +454,8 @@ function liveGuardViolations(info, refPrice, g) {
 
 // Returns { check, info, overridden } or throws GateError (409 = needs confirmation, 400 = hard rule)
 async function gateDeploy(target, { configName, yaml: yamlText, override, auto = false } = {}) {
-  if (auto) override = undefined; // automatic launches must pass every check outright
+  // Automatic launches must pass every check outright, or carry a valid AI approval
+  if (auto) override = override && override.aiReviewId ? { aiReviewId: override.aiReviewId } : undefined;
   const cfg = loadConfig();
   const g = guardSettings(cfg);
   const parsed = parseStrategyYaml(yamlText);
@@ -467,7 +468,7 @@ async function gateDeploy(target, { configName, yaml: yamlText, override, auto =
   if (!info.supported || !info.exA || !info.exB || !info.symbol || !info.quote) {
     reasons = [`Cannot cross-check this strategy automatically (${info.strategy}; connectors ${info.exA || '?'} / ${info.exB || '?'})`];
   } else {
-    check = await runCrossCheck({
+    check = await module.exports.runCrossCheck({
       symbol: info.symbol, quote: info.quote, exA: info.exA, exB: info.exB,
       strategy: info.strategy, baseAmount: info.baseAmount, target,
       minProfitabilityPct: info.minProfitabilityPct,
@@ -485,7 +486,19 @@ async function gateDeploy(target, { configName, yaml: yamlText, override, auto =
 
   const allowed = !!(check && check.allowed);
   let overridden = false;
-  if (!allowed) {
+  let aiReviewId = null;
+  if (!allowed && override && override.aiReviewId && check) {
+    // AI approval: re-validated against the fresh check; hard checks are never overridable
+    const v = require('./aiReview').validateForGate(override.aiReviewId, check, info);
+    const phraseOk = !info.live || auto || String(override.phrase || '').trim().toUpperCase() === phrase.toUpperCase();
+    if (!v.ok || !phraseOk) {
+      const why = !v.ok ? v.reason : `Type ${phrase} to launch with real funds`;
+      audit({ action: auto ? 'auto_blocked' : 'blocked', target, configName, pair: `${info.symbol}-${info.quote}`, live: info.live, reasons: [why, ...reasons] });
+      throw new GateError(`Blocked: ${why}`, 409, { blocked: true, check, reasons: [why, ...reasons], requiresConfirmation: { live: info.live, phrase: info.live ? phrase : null } });
+    }
+    overridden = 'ai';
+    aiReviewId = override.aiReviewId;
+  } else if (!allowed) {
     const ok = override && override.confirmed === true
       && (!info.live || String(override.phrase || '').trim().toUpperCase() === phrase.toUpperCase());
     if (!ok) {
@@ -499,11 +512,12 @@ async function gateDeploy(target, { configName, yaml: yamlText, override, auto =
     overridden = true;
   }
   audit({
-    action: overridden ? 'override' : auto ? 'auto_allowed' : 'allowed', target, configName, pair: `${info.symbol}-${info.quote}`,
+    action: overridden === 'ai' ? (auto ? 'auto_ai_override' : 'ai_override') : overridden ? 'override' : auto ? 'auto_allowed' : 'allowed',
+    target, configName, pair: `${info.symbol}-${info.quote}`, aiReviewId,
     live: info.live, reasons: overridden ? reasons : [],
     netPct: check ? check.perTrade.netPct ?? null : null, monthlyNet: check ? check.monthly.monthlyNet : null,
   });
-  return { check, info, overridden };
+  return { check, info, overridden, aiReviewId };
 }
 
 // ─── 4. Live stop-loss monitor ───────────────────────────────────────────────
@@ -673,5 +687,7 @@ module.exports = {
   monitor,
   history,
   readAudit: () => readJson(AUDIT_FILE, []),
+  statsForCoin,
+  audit,
   GateError,
 };

@@ -4,6 +4,7 @@ import { api } from '../api';
 import { EXCHANGES, fmtUsd, fmtPrice } from '../constants';
 import { C, S, Modal, Badge, Notice, CopyBtn } from '../ui';
 import CrossCheckReport, { OverrideConfirm, overrideReady } from './CrossCheckReport';
+import { AskAiButton, AiReviewCard } from './AiReview';
 
 export default function DeployModal({ target, pair, quote = 'USD', hosts = [], defaultHost = 'local', vpnStatus, onClose, onDeployed }) {
   const [strategy, setStrategy] = useState('amm_arb'); // 'amm_arb' | 'cross_exchange_market_making'
@@ -33,6 +34,7 @@ export default function DeployModal({ target, pair, quote = 'USD', hosts = [], d
   const [confirmed, setConfirmed] = useState(false);
   const [typed, setTyped] = useState('');
   const [violations, setViolations] = useState([]);
+  const [aiReview, setAiReview] = useState(null);
 
   const refPrice = target.buyPrice || target.priceA || 1;
   const baseAmt = refPrice > 0 ? (tradeSizeUsd / refPrice) : 0;
@@ -101,7 +103,7 @@ export default function DeployModal({ target, pair, quote = 'USD', hosts = [], d
     return () => clearTimeout(t);
   }, [runCheck]);
 
-  useEffect(() => { setConfirmed(false); setTyped(''); }, [paperTrade, target.symbol, hostId]);
+  useEffect(() => { setConfirmed(false); setTyped(''); setAiReview(null); }, [paperTrade, target.symbol, hostId, tradeSizeUsd, pair.id]);
 
   const phrase = `${target.symbol}-${quote} LIVE`;
   const needsOverride = !(check && check.allowed);
@@ -110,7 +112,10 @@ export default function DeployModal({ target, pair, quote = 'USD', hosts = [], d
     tradeSizeUsd > guardCfg.liveMaxOrderUsd ? `Order size ${fmtUsd(tradeSizeUsd, 0)} is above the live max of ${fmtUsd(guardCfg.liveMaxOrderUsd, 0)}` : null,
     minProfitPct < guardCfg.liveMinProfitabilityPct ? `Min profitability ${minProfitPct}% is below the live floor of ${guardCfg.liveMinProfitabilityPct}%` : null,
   ].filter(Boolean) : [];
-  const launchBlocked = liveRailIssues.length > 0 || checking || (needsOverride && !overrideOk);
+  // An AI approval stands in for the checkbox (live still needs the typed phrase)
+  const aiApproved = !!(aiReview && aiReview.policy.approved && !!aiReview.live === !paperTrade && tradeSizeUsd <= aiReview.policy.maxOrderUsd * 1.05);
+  const aiReady = aiApproved && (paperTrade || String(typed).trim().toUpperCase() === phrase.toUpperCase());
+  const launchBlocked = liveRailIssues.length > 0 || checking || (needsOverride && !overrideOk && !aiReady);
 
   const submit = async (autoStart) => {
     setBusy(true); setError(''); setResult(null); setViolations([]);
@@ -125,7 +130,9 @@ export default function DeployModal({ target, pair, quote = 'USD', hosts = [], d
           autoStart,
           memLimit,
           cpuLimit,
-          override: autoStart && needsOverride ? { confirmed, phrase: typed } : undefined,
+          override: autoStart && needsOverride
+            ? (aiReady && !overrideOk ? { aiReviewId: aiReview.id, phrase: typed } : { confirmed, phrase: typed })
+            : undefined,
         },
       });
       setResult(res);
@@ -267,6 +274,19 @@ export default function DeployModal({ target, pair, quote = 'USD', hosts = [], d
       {violations.length > 0 && <Notice tone="error">{`Blocked by live guard rails:\n✗ ${violations.join('\n✗ ')}`}</Notice>}
 
       {needsOverride && check && !checking && (
+        <div style={{ marginBottom: 12 }}>
+          <AskAiButton
+            label="🧠 Ask AI if this is real and tradeable"
+            request={{ symbol: target.symbol, quote, exA: pair.a, exB: pair.b, strategy, tradeSize: tradeSizeUsd, target: hostId, live: !paperTrade }}
+            onReview={setAiReview} />
+          <AiReviewCard review={aiReview} />
+          {aiReview && aiReview.policy.approved && tradeSizeUsd > aiReview.policy.maxOrderUsd * 1.05 && (
+            <Notice tone="warn">{`AI approved orders up to ${fmtUsd(aiReview.policy.maxOrderUsd, 0)}. Lower the trade size to deploy with the AI approval.`}</Notice>
+          )}
+        </div>
+      )}
+
+      {needsOverride && check && !checking && (
         <OverrideConfirm live={!paperTrade} phrase={phrase} confirmed={confirmed} setConfirmed={setConfirmed} typed={typed} setTyped={setTyped} />
       )}
 
@@ -297,7 +317,7 @@ export default function DeployModal({ target, pair, quote = 'USD', hosts = [], d
           ✓ {result.message || `Saved ${result.configName}.yml`}
           {result.containerId && result.containerId !== 'interactive' ? `\nContainer ID: ${result.containerId.slice(0, 12)} (${result.containerName})` : ''}
           {result.paperSetup?.changed ? '\nAuto-configured conf/conf_client.yml with paper exchanges & starter balances.' : ''}
-          {result.guard?.overridden ? '\nLaunched with manual override (logged).' : ''}
+          {result.guard?.overridden === 'ai' ? '\nLaunched on the AI approval (logged).' : result.guard?.overridden ? '\nLaunched with manual override (logged).' : ''}
           {result.guard?.killSwitch ? `\nStop-loss: kill switch at ${result.guard.killSwitch.killSwitchRate}% return${result.guard.killSwitch.keptExisting ? ' (kept your tighter setting)' : ''}.` : ''}
           {result.guard?.monitored ? '\nLive stop-loss monitor is watching this bot.' : ''}
           {result.command && !result.opened ? `\nRun in terminal:\n${result.command}` : ''}
@@ -311,7 +331,7 @@ export default function DeployModal({ target, pair, quote = 'USD', hosts = [], d
         </button>
         <button className="tbtn" disabled={busy || vpnBlocked || launchBlocked} onClick={() => submit(true)} style={S.btn(paperTrade ? C.green : C.red, true)}
           title={launchBlocked ? 'Needs a passing cross-check or manual confirmation' : ''}>
-          {busy ? 'Deploying...' : `🚀 ${needsOverride ? 'Override & ' : ''}Deploy ${paperTrade ? 'Paper' : 'LIVE'} Bot (${fmtUsd(tradeSizeUsd, 0)})`}
+          {busy ? 'Deploying...' : `🚀 ${needsOverride ? (aiReady && !overrideOk ? 'AI-Approved ' : 'Override & ') : ''}Deploy ${paperTrade ? 'Paper' : 'LIVE'} Bot (${fmtUsd(tradeSizeUsd, 0)})`}
         </button>
       </div>
     </Modal>

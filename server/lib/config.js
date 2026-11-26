@@ -68,6 +68,22 @@ const DEFAULT_AUTOTRADE = {
   symbolCooldownMin: 60,      // no re-launch on the same coin within this window
 };
 
+// AI reviewer: a second opinion on targets the safety checks blocked
+const DEFAULT_AI_REVIEW = {
+  enabled: false,
+  provider: 'anthropic',       // 'anthropic' | 'openai' (also any OpenAI-compatible server via baseUrl)
+  model: 'claude-sonnet-5-5',
+  apiKey: '',                  // or ANTHROPIC_API_KEY / OPENAI_API_KEY env var
+  baseUrl: '',                 // e.g. http://localhost:1234/v1 for LM Studio / Ollama
+  autoOverride: true,          // auto-trader may launch AI-approved targets
+  allowLive: false,            // AI approvals only count in paper unless this is turned on
+  minConfidence: 0.75,
+  maxOrderUsd: 250,            // order cap for AI-approved bots
+  maxRuntimeMin: 30,           // run-time cap for AI-approved auto bots
+  maxPerHour: 20,              // model calls per hour
+  validMin: 10,                // an approval is only usable this long
+};
+
 const DEFAULTS = {
   hbImage: 'hummingbot/hummingbot:version-2.14.0',
   hbPassword: '',
@@ -79,6 +95,7 @@ const DEFAULTS = {
   alerts: DEFAULT_ALERTS,
   guard: DEFAULT_GUARD,
   autoTrade: DEFAULT_AUTOTRADE,
+  aiReview: DEFAULT_AI_REVIEW,
   watchAccounts: [],
 };
 
@@ -91,6 +108,7 @@ function migrate(raw) {
   cfg.alerts = { ...DEFAULT_ALERTS, ...(raw.alerts || {}) };
   cfg.guard = { ...DEFAULT_GUARD, ...(raw.guard || {}) };
   cfg.autoTrade = { ...DEFAULT_AUTOTRADE, ...(raw.autoTrade || {}) };
+  cfg.aiReview = { ...DEFAULT_AI_REVIEW, ...(raw.aiReview || {}) };
   if (!Array.isArray(cfg.servers)) cfg.servers = [];
   if (!Array.isArray(cfg.watchAccounts)) cfg.watchAccounts = [];
 
@@ -172,4 +190,4 @@ function validateServer(s) {
   return errors;
 }
 
-module.exports = { loadConfig, saveConfig, updateConfig, publicConfig, validateServer, DEFAULT_FEES, DEFAULT_ALERTS, DEFAULT_GUARD, DEFAULT_AUTOTRADE, CONFIG_PATH };
+module.exports = { loadConfig, saveConfig, updateConfig, publicConfig, validateServer, DEFAULT_FEES, DEFAULT_ALERTS, DEFAULT_GUARD, DEFAULT_AUTOTRADE, DEFAULT_AI_REVIEW, CONFIG_PATH };

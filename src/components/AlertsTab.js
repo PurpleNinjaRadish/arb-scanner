@@ -2,6 +2,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { api, setApiToken } from '../api';
 import { EXCHANGE_PAIRS, QUOTES, EXCHANGES, fmtPrice, fmtUsd } from '../constants';
+import { AskAiButton, AiReviewCard } from './AiReview';
 import { C, S, Badge, MetricCard, Notice, CopyBtn } from '../ui';
 
 export default function AlertsTab({
@@ -12,6 +13,7 @@ export default function AlertsTab({
 }) {
   const [settings, setSettings] = useState(null);
   const [status, setStatus] = useState(null);
+  const [aiReviews, setAiReviews] = useState({});
   const [alerts, setAlerts] = useState([]);
   const [pairing, setPairing] = useState(null);
   const [tgToken, setTgToken] = useState('');
@@ -328,7 +330,8 @@ export default function AlertsTab({
         ) : (
           <div style={{ display: 'grid', gap: 8 }}>
             {alerts.map(a => (
-              <div key={a.id} style={{
+              <div key={a.id}>
+              <div style={{
                 background: a.read ? '#050912' : '#061a12',
                 border: `1px solid ${a.read ? C.border : `${C.green}66`}`,
                 borderRadius: 8, padding: '10px 14px',
@@ -347,11 +350,19 @@ export default function AlertsTab({
                       : <>{new Date(a.ts).toLocaleString()} · Buy {EXCHANGES[a.buyOn]?.label || a.buyOn} @ {fmtPrice(a.buyPrice)} → Sell {EXCHANGES[a.sellOn]?.label || a.sellOn} @ {fmtPrice(a.sellPrice)} · Size {fmtUsd(a.tradeSize, 0)}</>}
                   </div>
                 </div>
-                {onDeployFromAlert && !a.isTest && !['guard', 'auto'].includes(a.kind) && (
-                  <button className="tbtn" onClick={() => onDeployFromAlert(a)} style={S.btn(C.green, true)}>
-                    🤖 Deploy Bot
-                  </button>
+                {!a.isTest && !['guard', 'auto'].includes(a.kind) && (
+                  <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                    <AskAiButton compact label="🧠 AI Check" request={{ alertId: a.id }}
+                      onReview={r => setAiReviews(m => ({ ...m, [a.id]: r }))} />
+                    {onDeployFromAlert && (
+                      <button className="tbtn" onClick={() => onDeployFromAlert(a)} style={S.btn(C.green, true)}>
+                        🤖 Deploy Bot
+                      </button>
+                    )}
+                  </div>
                 )}
+              </div>
+              {aiReviews[a.id] && <AiReviewCard review={aiReviews[a.id]} />}
               </div>
             ))}
           </div>

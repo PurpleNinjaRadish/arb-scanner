@@ -417,6 +417,25 @@ app.get('/api/tickers/audit', wrap(async (req, res) => {
   res.json(full ? a : { ...a, symbols: undefined });
 }));
 
+// ─── AI reviewer (second opinion on blocked targets) ─────────────────────────
+const aiReview = require('./lib/aiReview');
+app.post('/api/ai/review', wrap(async (req, res) => {
+  const b = req.body || {};
+  let alert = null;
+  if (b.alertId) alert = alertManager.list({ limit: 500 }).find(a => a.id === b.alertId) || null;
+  const [exA, exB] = alert ? String(alert.pair || '').split('_') : [b.exA, b.exB];
+  res.json(await aiReview.review({
+    symbol: alert ? alert.symbol : b.symbol, quote: alert ? alert.quote : b.quote,
+    exA, exB, strategy: b.strategy || 'amm_arb',
+    tradeSize: Number(b.tradeSize || (alert && alert.tradeSize)) || 1000,
+    target: b.target || 'local', live: !!b.live, alert, source: alert ? 'alert' : 'manual',
+  }));
+}));
+app.get('/api/ai/reviews', (req, res) => res.json({ reviews: aiReview.list() }));
+app.get('/api/ai/settings', (req, res) => res.json(aiReview.publicSettings()));
+app.post('/api/ai/settings', wrap(async (req, res) => res.json(aiReview.updateSettings(req.body || {}))));
+app.post('/api/ai/test', wrap(async (req, res) => res.json(await aiReview.testConnection())));
+
 // ─── Auto-trader (Target Watcher → bot, paper by default) ────────────────────
 app.get('/api/autotrade', (req, res) => res.json(autoTrader.status()));
 

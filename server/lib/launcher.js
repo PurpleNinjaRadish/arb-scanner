@@ -26,6 +26,7 @@ async function guardedLaunch(target, { configName, yaml, override, auto = null }
     guard: {
       allowed: gate.check ? gate.check.allowed : false,
       overridden: gate.overridden,
+      aiReviewId: gate.aiReviewId || null,
       live: gate.info.live,
       killSwitch,
       monitored: !!monitored,

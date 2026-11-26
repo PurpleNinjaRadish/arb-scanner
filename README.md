@@ -74,6 +74,18 @@ When the Target Watcher finds a target, the auto-trader launches a bot for it, b
 - **Its own limits:** max order size, bot min profitability, max bots at once, max launches per 24 h, same-coin cooldown, and a max run time after which each auto bot is stopped.
 - Turning auto-trade on also turns on the Target Watcher (pair, quote and thresholds are set in 🔔 Alerts). Each launch sends a push notification.
 
+## AI Reviewer (🧠 — Cross-Check tab settings; "AI Check" on alerts, Cross-Check and Deploy)
+For a target the safety checks blocked, the AI reviewer collects the evidence and asks Claude (Anthropic API) or an OpenAI / OpenAI-compatible model (LM Studio, Ollama) whether it's real and tradeable. The evidence is live prices on every exchange, both order books, each exchange's deposit/withdrawal status, status-page incidents, the ticker audit and scanner history.
+
+What an approval can and can't do is decided in code, not by the model:
+- **It can override the judgement checks:** a price far from the other exchanges, an implausibly wide gap, scanner/book drift, missing history, and the monthly projection (treated as a one-off).
+- **It can never override:** a per-trade loss on live books, missing/crossed/thin order books, a known different coin sharing the ticker, or the live guard rails.
+- **It's re-checked at launch** against fresh prices, expires after 10 minutes, and caps the order size ($250, or lower if the AI recommends it).
+- **Paper-only by default.** Allowing live needs the typed phrase `AI CAN APPROVE LIVE`. Manual live launches still need the pair's `LIVE` phrase.
+- **With Auto-Trade on**, a blocked target is sent to the AI automatically. An approval launches with the AI order cap and a 30-minute run time.
+
+Set the provider, model (default `claude-sonnet-5-5`) and API key in Cross-Check → AI Reviewer, or use the `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` env var.
+
 ## Ticker Audit (🔤 Ticker Audit tab)
 Exchanges don't always agree on tickers. The same coin can have different tickers (Kraken `XBT` = `BTC`; OKX/KuCoin `LIT` = Lighter = `LIGHTER` on Kraken/Coinbase), and different coins can share one (Kraken `ONE` is not Harmony `ONE`). The scanner maps every listing to one canonical ticker (`server/lib/tickers.js`), then audits all USD/USDC/USDT markets on every reachable exchange every 30 minutes. Any listing more than 20% off the other exchanges' median price is excluded from the scanner, alerts and bot launches. Hummingbot strategies get each exchange's own market name automatically. The tab lists every coin per exchange, shows what was flagged and why, and exports CSV.
 

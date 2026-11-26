@@ -124,39 +124,71 @@ class AutoTrader {
     // Strategy
     const tradeSizeUsd = Math.max(10, Math.min(Number(alert.tradeSize) || s.maxOrderUsd, s.maxOrderUsd, live ? g.liveMaxOrderUsd : Infinity));
     const minProfitabilityPct = Math.max(s.minProfitabilityPct, live ? g.liveMinProfitabilityPct : 0);
-    const yaml = generateStrategyYaml({
-      strategy: s.strategy, symbol: sym, quote, exA, exB,
-      makerEx: alert.buyOn, takerEx: alert.sellOn,
-      tradeSizeUsd, refPrice: alert.buyPrice, minProfitabilityPct,
-      paperTrade: !live, netProfitPreview: alert.netProfitPct,
-    });
-    const configName = `auto_${sym.toLowerCase().replace(/[^a-z0-9]/g, '')}_${quote.toLowerCase()}_${Date.now().toString(36).slice(-6)}`;
-
-    try {
-      const res = await guardedLaunch(s.target, { configName, yaml, auto: { maxRuntimeMin: s.maxRuntimeMin } },
+    const launch = async (sizeUsd, override, maxRuntimeMin) => {
+      const yaml = generateStrategyYaml({
+        strategy: s.strategy, symbol: sym, quote, exA, exB,
+        makerEx: alert.buyOn, takerEx: alert.sellOn,
+        tradeSizeUsd: sizeUsd, refPrice: alert.buyPrice, minProfitabilityPct,
+        paperTrade: !live, netProfitPreview: alert.netProfitPct,
+      });
+      const configName = `auto_${sym.toLowerCase().replace(/[^a-z0-9]/g, '')}_${quote.toLowerCase()}_${Date.now().toString(36).slice(-6)}`;
+      const res = await guardedLaunch(s.target, { configName, yaml, override, auto: { maxRuntimeMin } },
         () => hb.deployStrategy(s.target, { configName, yaml, launchMode: 'detached', autoStart: true }));
+      return { res, configName };
+    };
+    const launched = async ({ res, configName }, sizeUsd, maxRuntimeMin, ai = null) => {
       const t = res.guard.check ? res.guard.check.perTrade : {};
       const m = res.guard.check ? res.guard.check.monthly : {};
       const entry = this.record({
-        ...base, outcome: 'launched', containerName: res.containerName, configName, tradeSizeUsd,
+        ...base, outcome: 'launched', containerName: res.containerName, configName, tradeSizeUsd: sizeUsd,
         verifiedNetPct: t.netPct ?? null, monthlyNet: m.monthlyNet ?? null,
+        ...(ai ? { aiReviewId: ai.id, reason: `AI override (${ai.verdict.confidence.toFixed(2)} confidence): ${ai.verdict.summary}` } : {}),
       });
       await this.notify(
-        `AUTO BOT (${live ? 'LIVE' : 'PAPER'}): ${sym}-${quote} launched`,
-        `${res.containerName} on ${s.target}: buy ${EXCHANGES[alert.buyOn]?.label || alert.buyOn} → sell ${EXCHANGES[alert.sellOn]?.label || alert.sellOn}, $${tradeSizeUsd} orders. `
-        + `Verified ${t.netPct != null ? t.netPct.toFixed(3) : '?'}%/trade, ${m.monthlyNet != null ? '$' + m.monthlyNet + '/mo' : ''}. Stops after ${s.maxRuntimeMin} min.`,
+        `AUTO BOT (${live ? 'LIVE' : 'PAPER'}${ai ? ', AI-APPROVED' : ''}): ${sym}-${quote} launched`,
+        `${res.containerName} on ${s.target}: buy ${EXCHANGES[alert.buyOn]?.label || alert.buyOn} → sell ${EXCHANGES[alert.sellOn]?.label || alert.sellOn}, $${sizeUsd} orders. `
+        + `Verified ${t.netPct != null ? t.netPct.toFixed(3) : '?'}%/trade. Stops after ${maxRuntimeMin} min.`
+        + (ai ? ` AI: ${ai.verdict.summary}` : ''),
         sym,
       ).catch(() => {});
       return entry;
+    };
+
+    let blocked;
+    try {
+      return await launched(await launch(tradeSizeUsd, undefined, s.maxRuntimeMin), tradeSizeUsd, s.maxRuntimeMin);
     } catch (e) {
-      if (e instanceof guard.GateError) {
-        const reasons = e.reasons || e.guardViolations || [];
-        return skip(`Failed safety checks: ${reasons.slice(0, 3).join(' | ') || e.message}`, {
-          verifiedNetPct: e.check ? e.check.perTrade.netPct ?? null : null,
-          monthlyNet: e.check ? e.check.monthly.monthlyNet : null,
-        });
-      }
-      return this.record({ ...base, outcome: 'error', reason: e.message });
+      if (!(e instanceof guard.GateError)) return this.record({ ...base, outcome: 'error', reason: e.message });
+      blocked = e;
+    }
+
+    const reasons = blocked.reasons || blocked.guardViolations || [];
+    const checkInfo = {
+      verifiedNetPct: blocked.check ? blocked.check.perTrade.netPct ?? null : null,
+      monthlyNet: blocked.check ? blocked.check.monthly.monthlyNet : null,
+    };
+    const failed = `Failed safety checks: ${reasons.slice(0, 3).join(' | ') || blocked.message}`;
+
+    // Second opinion: the AI reviewer may approve targets blocked only by judgement checks
+    const aiReview = require('./aiReview');
+    const ai = aiReview.settings();
+    if (blocked.status !== 409 || !ai.enabled || !ai.autoOverride) return skip(failed, checkInfo);
+    let rec;
+    try {
+      rec = await aiReview.review({ symbol: sym, quote, exA, exB, strategy: s.strategy, tradeSize: tradeSizeUsd, target: s.target, live, alert, source: 'auto' });
+    } catch (e) {
+      return skip(`${failed} — AI review unavailable: ${e.message}`, checkInfo);
+    }
+    if (!rec.policy.approved) {
+      return skip(`${failed} — AI review: ${rec.policy.reasons.slice(0, 2).join('; ')}`, { ...checkInfo, aiReviewId: rec.id });
+    }
+    const aiSize = Math.max(10, Math.min(tradeSizeUsd, rec.policy.maxOrderUsd));
+    const aiRuntime = Math.min(s.maxRuntimeMin, ai.maxRuntimeMin);
+    try {
+      return await launched(await launch(aiSize, { aiReviewId: rec.id }, aiRuntime), aiSize, aiRuntime, rec);
+    } catch (e) {
+      const why = e instanceof guard.GateError ? (e.reasons || [])[0] || e.message : e.message;
+      return this.record({ ...base, outcome: e instanceof guard.GateError ? 'skipped' : 'error', reason: `AI approved, but the launch was blocked: ${why}`, aiReviewId: rec.id });
     }
   }
 

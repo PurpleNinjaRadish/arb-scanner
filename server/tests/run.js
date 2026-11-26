@@ -642,5 +642,165 @@ function invokeApp(method, urlPath, body) {
     assert.ok(ok.overridden, 'the same override works for a manual launch');
   });
 
+  // ─── AI reviewer (model + market data stubbed; the ETC case from 2026-11-25) ─
+  const aiReview = require('../lib/aiReview');
+  const ev = (m, o = {}) => venue(m, { size: 60, ...o }); // ETC books with real depth
+  // Kraken ETC ~5.9% above Coinbase, OKX and Binance; real live books on both sides
+  const etcCheck = (over = {}) => guard.evaluateCrossCheck({
+    symbol: 'ETC', quote: 'USD', exA: 'kraken', exB: 'coinbase', fees: DEFAULT_FEES, tradeSize: 250,
+    references: [{ ex: 'okx', label: 'OKX', mid: 5.9635 }, { ex: 'binance', label: 'Binance', mid: 5.965 }, { ex: 'binanceus', label: 'Binance.US', mid: 5.96 }],
+    server: { allocatedMonthlyUsd: 11.5, source: 'estimate' }, stats: null,
+    venues: { kraken: ev(6.3155), coinbase: ev(5.957) }, tickerBlocks: [], ...over,
+  });
+  const verdictJson = (o = {}) => JSON.stringify({ verdict: 'tradeable', confidence: 0.82, same_asset: true, prices_genuine: true, executable_with_inventory: true, gap_cause: 'Kraken-only premium; ETC deposits need ~12 h of confirmations', transfer_status: 'Deposits and withdrawals enabled on both', key_risks: ['Thin Kraken book'], recommended_max_order_usd: 200, summary: 'Real Kraken premium; capturable with ETC already on Kraken.', ...o });
+
+  await test('ai: policy lets the AI override judgement checks only, never the math or hard rules', () => {
+    const s = { ...aiReview.settings(), enabled: true, minConfidence: 0.75, maxOrderUsd: 250, allowLive: false };
+    const v = aiReview.parseVerdict(verdictJson(), 250);
+    const chk = etcCheck();
+    const failed = chk.checks.filter(c => c.status === 'fail').map(c => c.id);
+    assert.ok(failed.includes('reference'), 'the ETC case is blocked by the reference check');
+    assert.ok(chk.perTrade.pass, 'and is profitable per trade on the live books');
+    const ok = aiReview.applyPolicy(v, chk, s, false);
+    assert.ok(ok.approved, ok.reasons.join('; '));
+    assert.strictEqual(ok.maxOrderUsd, 200, 'AI-recommended size lowers the cap');
+
+    assert.ok(!aiReview.applyPolicy(v, chk, s, true).approved, 'paper-only unless allowLive');
+    assert.ok(aiReview.applyPolicy(v, chk, { ...s, allowLive: true }, true).approved);
+    assert.ok(!aiReview.applyPolicy(aiReview.parseVerdict(verdictJson({ confidence: 0.6 }), 250), chk, s, false).approved, 'low confidence');
+    assert.ok(!aiReview.applyPolicy(aiReview.parseVerdict(verdictJson({ verdict: 'uncertain' }), 250), chk, s, false).approved);
+    assert.ok(!aiReview.applyPolicy(aiReview.parseVerdict(verdictJson({ same_asset: false }), 250), chk, s, false).approved);
+    // Hard rules: different coin, thin book, per-trade loss — never overridable
+    const diffCoin = etcCheck({ tickerBlocks: ['Kraken ETC: known different coin'] });
+    assert.match(aiReview.applyPolicy(v, diffCoin, s, false).reasons.join(' '), /never overridable/);
+    const thin = etcCheck({ tradeSize: 50000, venues: { kraken: ev(6.3155, { levels: 2, size: 1 }), coinbase: ev(5.957) } });
+    assert.ok(!aiReview.applyPolicy(v, thin, s, false).approved);
+    const loss = etcCheck({ venues: { kraken: ev(5.96), coinbase: ev(5.957) } });
+    assert.ok(!loss.perTrade.pass);
+    assert.match(aiReview.applyPolicy(v, loss, s, false).reasons.join(' '), /Not profitable per trade/);
+    // Malformed model output counts as no verdict
+    assert.strictEqual(aiReview.parseVerdict('not json', 250), null);
+    assert.ok(!aiReview.applyPolicy(null, chk, s, false).approved);
+    assert.strictEqual(aiReview.parseVerdict(verdictJson({ confidence: 85, verdict: 'Tradeable' }), 250).confidence, 0.85, 'percent confidence and enum case normalised');
+  });
+
+  await test('ai: review → deploy gate accepts a fresh approval, re-checks at launch, rejects stale/mismatched', async () => {
+    const savedEv = aiReview.collectEvidence, savedModel = aiReview.callModel, savedCC = guard.runCrossCheck;
+    let liveCheck = etcCheck();
+    aiReview.collectEvidence = async () => ({ check: liveCheck, evidence: { stub: true } });
+    aiReview.callModel = async () => ({ raw: verdictJson() });
+    guard.runCrossCheck = async () => liveCheck;
+    aiReview.updateSettings({ enabled: true, maxOrderUsd: 250, validMin: 10, allowLive: false });
+    const yml = (paper = true, usd = 200) => generateStrategyYaml({ strategy: 'amm_arb', symbol: 'ETC', quote: 'USD', exA: 'kraken', exB: 'coinbase', tradeSizeUsd: usd, refPrice: 6.13, minProfitabilityPct: 0.5, paperTrade: paper });
+    try {
+      await assert.rejects(guard.gateDeploy('local', { configName: 'etc', yaml: yml() }), e => e.status === 409, 'blocked without approval');
+      const rec = await aiReview.review({ symbol: 'ETC', quote: 'USD', exA: 'kraken', exB: 'coinbase', tradeSize: 250 });
+      assert.ok(rec.policy.approved, rec.policy.reasons.join('; '));
+      assert.ok(rec.policy.overrides.some(o => /independent exchange/i.test(o)), rec.policy.overrides.join("; "));
+
+      const g = await guard.gateDeploy('local', { configName: 'etc', yaml: yml(), override: { aiReviewId: rec.id } });
+      assert.strictEqual(g.overridden, 'ai');
+      assert.ok(guard.readAudit().some(a => a.action === 'ai_override' && a.aiReviewId === rec.id));
+      // Auto launches may carry an AI approval (but not a manual one)
+      assert.strictEqual((await guard.gateDeploy('local', { configName: 'etc', yaml: yml(), auto: true, override: { aiReviewId: rec.id, confirmed: true } })).overridden, 'ai');
+
+      // Order above the AI cap
+      await assert.rejects(guard.gateDeploy('local', { configName: 'etc', yaml: yml(true, 1000), override: { aiReviewId: rec.id } }), e => /AI-approved max/.test(e.message));
+      // Conditions changed at launch (book thinned out) → hard rule re-applied
+      liveCheck = etcCheck({ tradeSize: 50000, venues: { kraken: ev(6.3155, { levels: 2, size: 1 }), coinbase: ev(5.957) } });
+      await assert.rejects(guard.gateDeploy('local', { configName: 'etc', yaml: yml(), override: { aiReviewId: rec.id } }), e => /Conditions changed/.test(e.message));
+      liveCheck = etcCheck();
+      // Paper approval can't launch live
+      await assert.rejects(guard.gateDeploy('local', { configName: 'etc', yaml: yml(false), override: { aiReviewId: rec.id, phrase: 'ETC-USD LIVE' } }), e => /paper trading/.test(e.message));
+      // Expired
+      const r = aiReview.list().find(x => x.id === rec.id);
+      require('../lib/aiReview');
+      const stale = (await aiReview.review({ symbol: 'ETC', quote: 'USD', exA: 'kraken', exB: 'coinbase', tradeSize: 250 }));
+      const stored = (function find(id) { return require('../lib/aiReview').list().find(x => x.id === id); })(stale.id);
+      assert.ok(stored && r);
+      // Age the stored record (list() returns copies) by validating against a short window
+      aiReview.updateSettings({ validMin: 1 });
+      const realNow = Date.now; Date.now = () => realNow() + 2 * 60000;
+      try { await assert.rejects(guard.gateDeploy('local', { configName: 'etc', yaml: yml(), override: { aiReviewId: stale.id } }), e => /expired/.test(e.message)); }
+      finally { Date.now = realNow; aiReview.updateSettings({ validMin: 10 }); }
+
+      // Live needs allowLive (typed confirmation) and, for manual launches, the live phrase
+      assert.throws(() => aiReview.updateSettings({ allowLive: true }), /AI CAN APPROVE LIVE/);
+      aiReview.updateSettings({ allowLive: true, confirmPhrase: 'ai can approve live' });
+      const liveRec = await aiReview.review({ symbol: 'ETC', quote: 'USD', exA: 'kraken', exB: 'coinbase', tradeSize: 250, live: true });
+      assert.ok(liveRec.policy.approved);
+      await assert.rejects(guard.gateDeploy('local', { configName: 'etc', yaml: yml(false), override: { aiReviewId: liveRec.id } }), e => /Type ETC-USD LIVE/.test(e.message));
+      assert.strictEqual((await guard.gateDeploy('local', { configName: 'etc', yaml: yml(false), override: { aiReviewId: liveRec.id, phrase: 'ETC-USD LIVE' } })).overridden, 'ai');
+
+      // A rejected review never unlocks the gate
+      aiReview.callModel = async () => ({ raw: verdictJson({ verdict: 'not_tradeable', summary: 'Deposits suspended on Kraken' }) });
+      const no = await aiReview.review({ symbol: 'ETC', quote: 'USD', exA: 'kraken', exB: 'coinbase', tradeSize: 250 });
+      assert.ok(!no.policy.approved);
+      await assert.rejects(guard.gateDeploy('local', { configName: 'etc', yaml: yml(), override: { aiReviewId: no.id } }), e => /AI did not approve/.test(e.message));
+      // Model errors are recorded, not thrown into the gate
+      aiReview.callModel = async () => { throw Object.assign(new Error('bad key'), { response: { status: 401, data: { error: { message: 'invalid x-api-key' } } } }); };
+      const err = await aiReview.review({ symbol: 'ETC', quote: 'USD', exA: 'kraken', exB: 'coinbase', tradeSize: 250 });
+      assert.ok(!err.policy.approved && /HTTP 401/.test(err.policy.reasons[0]));
+    } finally {
+      aiReview.collectEvidence = savedEv; aiReview.callModel = savedModel; guard.runCrossCheck = savedCC;
+      aiReview.updateSettings({ enabled: false, allowLive: false });
+      const { updateConfig } = require('../lib/config'); updateConfig(c => { c.aiReview.allowLive = false; });
+    }
+  });
+
+  await test('ai: auto-trader asks the AI when a target is blocked and launches only on approval', async () => {
+    const { autoTrader } = require('../lib/autoTrader');
+    const hbMod = require('../lib/hummingbot');
+    const saved = { deployStrategy: hbMod.deployStrategy, listContainers: hbMod.listContainers, ensureKillSwitch: hbMod.ensureKillSwitch };
+    const savedEv = aiReview.collectEvidence, savedModel = aiReview.callModel, savedCC = guard.runCrossCheck;
+    const deployed = [];
+    hbMod.deployStrategy = async (t, o) => { deployed.push(o); return { success: true, containerId: 'x', containerName: `arb_${o.configName}`, configName: o.configName }; };
+    hbMod.listContainers = async () => [];
+    hbMod.ensureKillSwitch = async () => ({ changed: false, killSwitchRate: -3 });
+    aiReview.collectEvidence = async () => ({ check: etcCheck(), evidence: {} });
+    guard.runCrossCheck = async () => etcCheck();
+    autoTrader.log = [];
+    for (const b of guard.monitor.list()) guard.monitor.remove(b.key);
+    const alert = { symbol: 'ETC', quote: 'USD', pair: 'kraken_coinbase', buyOn: 'coinbase', sellOn: 'kraken', buyPrice: 5.957, sellPrice: 6.28, tradeSize: 1000, netProfitPct: 2.57 };
+    try {
+      autoTrader.updateSettings({ enabled: true, mode: 'paper', maxOrderUsd: 500, maxRuntimeMin: 60, maxPerDay: 10, symbolCooldownMin: 0 });
+      // AI off → blocked target is skipped
+      aiReview.updateSettings({ enabled: false });
+      let r = await autoTrader.consider(alert);
+      assert.strictEqual(r.outcome, 'skipped');
+      assert.strictEqual(deployed.length, 0);
+
+      // AI says not tradeable → still skipped, with the AI's reason
+      aiReview.updateSettings({ enabled: true, autoOverride: true, maxOrderUsd: 250, maxRuntimeMin: 30 });
+      aiReview.callModel = async () => ({ raw: verdictJson({ verdict: 'not_tradeable' }) });
+      r = await autoTrader.consider(alert);
+      assert.strictEqual(r.outcome, 'skipped');
+      assert.match(r.reason, /AI review: AI verdict: not tradeable/);
+      assert.strictEqual(deployed.length, 0);
+
+      // AI approves → launched with the AI order cap (200) and the shorter run time (30 min)
+      aiReview.callModel = async () => ({ raw: verdictJson() });
+      r = await autoTrader.consider(alert);
+      assert.strictEqual(r.outcome, 'launched', r.reason);
+      assert.strictEqual(r.tradeSizeUsd, 200);
+      assert.ok(r.aiReviewId && /AI override/.test(r.reason));
+      const bot = guard.monitor.list().find(b => b.containerName === r.containerName);
+      assert.ok(bot.stopAt - bot.registeredAt <= 30 * 60000 + 1000);
+
+      // autoOverride off → AI not consulted
+      aiReview.updateSettings({ autoOverride: false });
+      for (const b of guard.monitor.list()) guard.monitor.remove(b.key);
+      r = await autoTrader.consider(alert);
+      assert.strictEqual(r.outcome, 'skipped');
+      assert.ok(!/AI review/.test(r.reason));
+    } finally {
+      Object.assign(hbMod, saved);
+      aiReview.collectEvidence = savedEv; aiReview.callModel = savedModel; guard.runCrossCheck = savedCC;
+      aiReview.updateSettings({ enabled: false, autoOverride: true });
+      autoTrader.updateSettings({ enabled: false });
+      for (const b of guard.monitor.list()) guard.monitor.remove(b.key);
+    }
+  });
+
   console.log(`\nCompleted: ${passed} test(s) passed.\n`);
 })();

@@ -4,6 +4,7 @@ import { api } from '../api';
 import { EXCHANGE_PAIRS, QUOTES, fmtUsd } from '../constants';
 import { C, S, Badge, Notice } from '../ui';
 import CrossCheckReport from './CrossCheckReport';
+import { AskAiButton, AiSettingsCard } from './AiReview';
 
 const AUTO_INTERVALS = [15, 30, 60, 300];
 
@@ -172,7 +173,19 @@ export default function CrossCheckTab({ activePairId, quote: defaultQuote, trade
       </div>
 
       {error && <Notice tone="error">✗ {error}</Notice>}
-      {check && <div style={{ ...S.card, marginBottom: 14 }}><CrossCheckReport check={check} /></div>}
+      {check && (
+        <div style={{ ...S.card, marginBottom: 14 }}>
+          <CrossCheckReport check={check} />
+          {!check.allowed && (
+            <div style={{ marginTop: 12 }}>
+              <AskAiButton key={check.id} label="🧠 Ask AI if this is real and tradeable"
+                request={{ symbol, quote, exA: pair.a, exB: pair.b, strategy, tradeSize, target }} />
+            </div>
+          )}
+        </div>
+      )}
+
+      <AiSettingsCard />
 
       {/* Monitored live bots */}
       <div style={{ ...S.card, marginBottom: 14 }}>
