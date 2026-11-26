@@ -86,6 +86,9 @@ What an approval can and can't do is decided in code, not by the model:
 
 Set the provider, model (default `claude-sonnet-5-5`) and API key in Cross-Check → AI Reviewer, or use the `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` env var.
 
+## Hummingbot Latency Test (☁ Servers → ⏱ Latency Test)
+Measures exchange latency from each host where bots run (your PC and each remote server) and compares them. On each host it starts a temporary container from your Hummingbot image, so the numbers include Docker networking exactly as a bot sees it. If the image isn't on a host, it falls back to curl over SSH, or to the backend on a Windows PC. Per exchange it measures DNS, network round trip, TLS handshake, a cold request, and repeated requests on a kept-alive connection (median, p90, jitter). Per trading pair it shows the time for one arbitrage round (both orders go out together, so a round takes as long as the slower exchange), which host is fastest and by how many ms, and which exchanges are region-blocked from each host. Results are kept for comparison over time.
+
 ## Ticker Audit (🔤 Ticker Audit tab)
 Exchanges don't always agree on tickers. The same coin can have different tickers (Kraken `XBT` = `BTC`; OKX/KuCoin `LIT` = Lighter = `LIGHTER` on Kraken/Coinbase), and different coins can share one (Kraken `ONE` is not Harmony `ONE`). The scanner maps every listing to one canonical ticker (`server/lib/tickers.js`), then audits all USD/USDC/USDT markets on every reachable exchange every 30 minutes. Any listing more than 20% off the other exchanges' median price is excluded from the scanner, alerts and bot launches. Hummingbot strategies get each exchange's own market name automatically. The tab lists every coin per exchange, shows what was flagged and why, and exports CSV.
 

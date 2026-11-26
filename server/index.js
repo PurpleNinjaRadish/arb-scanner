@@ -484,6 +484,19 @@ app.get('/api/advisor/capacity', wrap(async (req, res) => {
   res.json(await advisor.inspectHostCapacity(req.query.target || 'local'));
 }));
 
+// Hummingbot latency test: exchange latency measured on each host, compared
+const latency = require('./lib/latency');
+app.post('/api/latency/test', wrap(async (req, res) => {
+  const b = req.body || {};
+  res.json(await latency.runLatencyTest({
+    targets: Array.isArray(b.targets) ? b.targets : undefined,
+    exchanges: Array.isArray(b.exchanges) ? b.exchanges : undefined,
+    samples: Number(b.samples) || 10,
+    method: ['auto', 'hummingbot', 'shell', 'backend'].includes(b.method) ? b.method : 'auto',
+  }));
+}));
+app.get('/api/latency/history', (req, res) => res.json({ history: latency.history() }));
+
 app.post('/api/advisor/latency', wrap(async (req, res) => {
   const { target = 'local', exchanges } = req.body || {};
   res.json(await advisor.measureExchangeLatency(target, exchanges));

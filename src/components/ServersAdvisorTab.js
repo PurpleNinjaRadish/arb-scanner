@@ -3,6 +3,7 @@ import { useState, useEffect, useCallback } from 'react';
 import { api } from '../api';
 import { EXCHANGE_PAIRS, EXCHANGES, fmtUsd } from '../constants';
 import { C, S, Badge, MetricCard, Notice, CopyBtn } from '../ui';
+import LatencyTestPanel from './LatencyTestPanel';
 
 const EMPTY_SERVER = {
   id: '', name: '', provider: 'hetzner', host: '', port: 22,
@@ -198,6 +199,7 @@ export default function ServersAdvisorTab({
         {[
           ['advisor',   '🖥 Server Recommendations & Sizer'],
           ['hosts',     '☁ Local & Remote Hosts'],
+          ['latency',   '⏱ Latency Test'],
           ['provision', '⚡ 1-Click Remote Bootstrap'],
           ['fees',      '💸 Exchange Fee Schedule'],
         ].map(([k, l]) => (
@@ -519,6 +521,8 @@ export default function ServersAdvisorTab({
       )}
 
       {/* 4. EXCHANGE FEE SCHEDULE */}
+      {sub === 'latency' && <LatencyTestPanel hosts={hosts} />}
+
       {sub === 'fees' && (
         <div style={S.card}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 10, marginBottom: 14 }}>

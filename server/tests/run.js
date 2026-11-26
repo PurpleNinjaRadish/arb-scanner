@@ -802,5 +802,71 @@ function invokeApp(method, urlPath, body) {
     }
   });
 
+  // ─── Hummingbot latency test ──────────────────────────────────────────────
+  const latency = require('../lib/latency');
+  const res = (median, extra = {}) => ({ ok: true, status: 200, blocked: false, tcpMs: median / 2, warm: { n: 10, min: median - 1, median, p90: median + 4, max: median + 6, jitter: 1.5 }, ...extra });
+
+  await test('latency: compares hosts per exchange and per pair (slower leg), handles region blocks', () => {
+    const runs = [
+      { target: 'local', hostName: 'Local PC', ok: true, results: { kraken: res(45), coinbase: res(30), bybit: { ...res(12), status: 403, blocked: true } } },
+      { target: 'vps1', hostName: 'Hetzner Ashburn', ok: true, results: { kraken: res(8), coinbase: res(22), bybit: res(15) } },
+      { target: 'vps2', hostName: 'Broken', ok: false, error: 'SSH timeout' },
+    ];
+    const c = latency.compareHosts(runs);
+    const kr = c.perExchange.find(e => e.exchange === 'kraken');
+    assert.strictEqual(kr.bestTarget, 'vps1');
+    assert.strictEqual(kr.hosts.find(h => h.target === 'local').slowerByMs, 37);
+    const kc = c.perPair.find(p => p.pair === 'kraken_coinbase');
+    assert.strictEqual(kc.hosts.find(h => h.target === 'local').roundMs, 45, 'a round = the slower leg (Kraken 45 > Coinbase 30)');
+    assert.strictEqual(kc.hosts.find(h => h.target === 'vps1').roundMs, 22);
+    assert.strictEqual(kc.bestTarget, 'vps1');
+    assert.strictEqual(kc.advantageMs, 23);
+    const bk = c.perPair.find(p => p.pair === 'bybit_kraken');
+    assert.strictEqual(bk.hosts.find(h => h.target === 'local').ok, false);
+    assert.deepStrictEqual(bk.hosts.find(h => h.target === 'local').blocked, ['Bybit']);
+    assert.strictEqual(bk.bestTarget, 'vps1');
+    assert.strictEqual(bk.advantageMs, null, 'only one host can trade it');
+    assert.ok(c.blockedNotes.some(n => /Bybit returns HTTP 403 from Local PC/.test(n)));
+    assert.ok(c.headlines.includes('Kraken × Coinbase: Hetzner Ashburn is fastest at 22 ms per round, 23 ms (105%) ahead of Local PC'), c.headlines.join(' | '));
+  });
+
+  await test('latency: multi-host test runs every host, keeps failures, saves history', async () => {
+    const t = await latency.runLatencyTest({ targets: ['local'], exchanges: ['kraken', 'coinbase'], samples: 5 }, {
+      measureHost: async (target) => ({ target, hostName: 'Local PC', ok: true, method: 'backend-node', samples: 5, notes: [], durationMs: 10, results: { kraken: res(40), coinbase: res(25) } }),
+    });
+    assert.strictEqual(t.runs.length, 1);
+    assert.strictEqual(t.comparison.perPair.find(p => p.pair === 'kraken_coinbase').hosts[0].roundMs, 40);
+    assert.strictEqual(latency.history()[0].id, t.id);
+    await assert.rejects(latency.runLatencyTest({ targets: ['nope'] }), /No hosts selected/);
+  });
+
+  await test('latency: probes time a kept-alive connection (Node fallback, and the Python probe used in the container)', async () => {
+    const httpMod = require('http');
+    const srv = httpMod.createServer((q, r) => setTimeout(() => { r.statusCode = q.url.includes('geo') ? 451 : 200; r.end('{}'); }, q.url.includes('slow') ? 40 : 3));
+    srv.keepAliveTimeout = 10000;
+    await new Promise(r => srv.listen(0, '127.0.0.1', r));
+    const port = srv.address().port;
+    const targets = { fast: `http://127.0.0.1:${port}/t`, slow: `http://127.0.0.1:${port}/slow`, dead: 'http://127.0.0.1:1/' };
+    try {
+      const n = await latency.runNode(targets, 4);
+      assert.ok(n.results.fast.ok && n.results.fast.warm.n === 4);
+      assert.strictEqual(n.results.fast.reconnects, 0, 'requests reuse one connection');
+      assert.ok(n.results.slow.warm.median >= 38 && n.results.slow.warm.median > n.results.fast.warm.median + 25);
+      assert.strictEqual(n.results.dead.ok, false);
+
+      const { execFile } = require('child_process');
+      const py = await new Promise(resolve => execFile(process.platform === 'win32' ? 'python' : 'python3', ['-c', latency.pythonCommand(targets, 4)], { encoding: 'utf8', timeout: 30000 }, (e, out) => resolve(e ? null : out)));
+      if (py) {
+        const r = latency.parseProbeOutput(py);
+        assert.ok(r.fast.ok && r.fast.warm.n === 4 && r.fast.reconnects === 0);
+        assert.ok(r.slow.warm.median >= 38);
+        assert.strictEqual(r.dead.ok, false);
+      } else {
+        console.log('        (python not installed here — container probe check skipped)');
+      }
+      assert.strictEqual(latency.parseProbeOutput('docker: error'), null);
+    } finally { srv.close(); }
+  });
+
   console.log(`\nCompleted: ${passed} test(s) passed.\n`);
 })();
