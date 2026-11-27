@@ -47,10 +47,14 @@ class ArbApiClient(private val prefs: PrefsStore) {
             client.newCall(req).execute().use { res ->
                 val body = res.body?.string() ?: "{}"
                 val obj = runCatching { JSONObject(body) }.getOrDefault(JSONObject())
-                if (!res.isSuccessful) throw IllegalStateException(obj.optString("error", "HTTP ${res.code}"))
+                if (!res.isSuccessful) throw IllegalStateException(errorText(res.code, obj))
                 obj
             }
         }
+
+    private fun errorText(code: Int, obj: JSONObject): String =
+        if (code == 401 && obj.optBoolean("auth")) "Signed out — link this phone again (Connect tab → Link with code)"
+        else obj.optString("error", "HTTP $code")
 
     private suspend fun postJson(path: String, bodyObj: JSONObject = JSONObject()): JSONObject =
         withContext(Dispatchers.IO) {
@@ -60,18 +64,44 @@ class ArbApiClient(private val prefs: PrefsStore) {
             client.newCall(req).execute().use { res ->
                 val body = res.body?.string() ?: "{}"
                 val obj = runCatching { JSONObject(body) }.getOrDefault(JSONObject())
-                if (!res.isSuccessful) throw IllegalStateException(obj.optString("error", "HTTP ${res.code}"))
+                if (!res.isSuccessful) throw IllegalStateException(errorText(res.code, obj))
                 obj
             }
         }
 
     fun buildAlertStreamRequest(): Request {
         val tok = prefs.apiToken
-        val params = if (tok.isNotBlank()) mapOf("token" to tok) else emptyMap()
+        // A linked-device token travels only in the header — never in a URL that a tunnel might log
+        val params = if (tok.isNotBlank() && !prefs.isLinkedDevice) mapOf("token" to tok) else emptyMap()
         return reqBuilder(url("/api/alerts/stream", params))
             .header("Accept", "text/event-stream")
             .get()
             .build()
+    }
+
+    /** Redeem a one-time link code from the desktop's Remote Access page. Returns the server's device name. */
+    suspend fun linkWithCode(serverUrl: String, code: String, deviceName: String): String =
+        withContext(Dispatchers.IO) {
+            val base = serverUrl.trim().trimEnd('/')
+            require(base.startsWith("https://") || base.startsWith("http://")) { "Address must start with https://" }
+            val body = JSONObject().put("code", code.trim()).put("deviceName", deviceName.ifBlank { "Android" })
+            val req = Request.Builder().url("$base/api/remote/link")
+                .post(body.toString().toRequestBody(jsonMedia)).build()
+            client.newCall(req).execute().use { res ->
+                val obj = runCatching { JSONObject(res.body?.string() ?: "{}") }.getOrDefault(JSONObject())
+                if (!res.isSuccessful) throw IllegalStateException(obj.optString("error", "HTTP ${res.code}"))
+                val token = obj.optString("token", "")
+                require(token.startsWith("arbd_")) { "Server did not return a device token" }
+                prefs.applyLink(base, token)
+                val dev = obj.optJSONObject("device")
+                "${dev?.optString("name") ?: deviceName} (${if (dev?.optString("role") == "viewer") "view only" else "full control"})"
+            }
+        }
+
+    /** Sign this phone out of Remote Access (revokes its token on the PC). */
+    suspend fun signOutDevice() {
+        runCatching { postJson("/api/remote/logout") }
+        prefs.apiToken = ""
     }
 
     suspend fun health(): String {

@@ -34,6 +34,18 @@ class PrefsStore(context: Context) {
         get() = prefs.getBoolean("bg_poll_enabled", true)
         set(v) = prefs.edit().putBoolean("bg_poll_enabled", v).apply()
 
+    var deviceName: String
+        get() = prefs.getString("device_name", "") ?: ""
+        set(v) = prefs.edit().putString("device_name", v.trim()).apply()
+
+    /** True when signed in through Remote Access (per-device token, not the LAN API token). */
+    val isLinkedDevice: Boolean get() = apiToken.startsWith("arbd_")
+
+    fun applyLink(url: String, token: String) {
+        serverUrl = url
+        apiToken = token
+    }
+
     fun applyPairingJson(raw: String): Result<String> = runCatching {
         val obj = JSONObject(raw.trim())
         val url = obj.optString("url", "")

@@ -92,6 +92,21 @@ Measures exchange latency from each host where bots run (your PC and each remote
 ## Ticker Audit (🔤 Ticker Audit tab)
 Exchanges don't always agree on tickers. The same coin can have different tickers (Kraken `XBT` = `BTC`; OKX/KuCoin `LIT` = Lighter = `LIGHTER` on Kraken/Coinbase), and different coins can share one (Kraken `ONE` is not Harmony `ONE`). The scanner maps every listing to one canonical ticker (`server/lib/tickers.js`), then audits all USD/USDC/USDT markets on every reachable exchange every 30 minutes. Any listing more than 20% off the other exchanges' median price is excluded from the scanner, alerts and bot launches. Hummingbot strategies get each exchange's own market name automatically. The tab lists every coin per exchange, shows what was flagged and why, and exports CSV.
 
+## RPC Management (⛓ RPC tab)
+Keeps blockchain RPC endpoints per network (Ethereum, Arbitrum, Base, Optimism, Polygon, BNB, Avalanche, Celo, Unichain, Sepolia, Solana, Solana devnet) and pushes them into **Hummingbot Gateway**, the part of Hummingbot that DEX connectors (Uniswap, Jupiter, Raydium…) use. CEX bots don't use RPC.
+- **Test** checks each endpoint is the right chain (chain id / Solana genesis), times it, and flags any that are more than 5 blocks (50 slots) behind the best one. Your endpoints are compared with your provider key's URL and Gateway's public default. **Use fastest** makes the quickest healthy one active.
+- **Providers**: Infura / Helius / Chainstack keys, and which one each chain uses (`rpcProvider`). A provider replaces the per-network URL for the whole chain.
+- **Push to Gateway** finds the Gateway container on the chosen host, writes `nodeURL`, `rpcProvider` and `apiKeys` through Gateway's `/config/update` API (or edits `conf/*.yml` directly, comments kept, if the API isn't reachable), restarts the container, and reads `/chains/<chain>/status` to confirm each network answers through the new RPC. An endpoint that fails its test is never pushed unless you tick *Push even if a test fails*. **Import from Gateway** copies Gateway's current URLs into the list first.
+- URLs with API keys are masked everywhere in the UI and push history.
+
+## Remote Access (🌐 Remote Access tab)
+Use the web app or Android app from anywhere, without opening router ports.
+- A second listener (`127.0.0.1:3002`) handles remote traffic. **Every** API request on it needs a signed-in device token — being "from localhost" means nothing there, because the tunnel runs locally. The old static LAN API token is not accepted through it, and `/api/mobile/*` (pairing secrets) is never served remotely.
+- Sign in with a **password** (scrypt-hashed, 10+ chars) plus an optional **authenticator code** (TOTP — Google/Microsoft Authenticator, 1Password), or with a **one-time link code** made on the PC (8 characters, 10 minutes, single use, *full control* or *view only*). The code's QR opens the Android app directly (`arbscanner://link`); a second QR opens the web sign-in with the code filled in.
+- Device tokens are stored only as hashes, expire after 30 idle days (configurable), and can be signed out one by one or all at once. 5 wrong attempts lock an address for 15 min; 25 from anywhere pause all sign-ins for 15 min. Everything is in the security log.
+- Tunnels: **Tailscale** (`tailscale serve`, private to your own devices — most like remote desktop), **Cloudflare quick tunnel** (instant random `https://….trycloudflare.com`, no account), or **Cloudflare named tunnel** (your own domain; token from Zero Trust → Tunnels, public hostname → `http://localhost:3002`). The app starts, watches and restarts the tunnel itself. Install once: `winget install --id Tailscale.Tailscale` or `winget install --id Cloudflare.cloudflared`.
+- Docker: the compose file publishes 3002 on loopback, and `TUNNEL_TOKEN=… docker compose --profile tunnel up -d` runs cloudflared next to the app (point the hostname at `http://arb-scanner:3002`).
+
 ## Tests
 ```bash
 npm run test:server

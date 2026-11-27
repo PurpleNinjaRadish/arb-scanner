@@ -21,7 +21,7 @@ import com.arbscanner.mobile.notifications.AlertPollWorker
 import kotlinx.coroutines.launch
 
 @Composable
-fun SettingsScreen(api: ArbApiClient, prefs: PrefsStore) {
+fun SettingsScreen(api: ArbApiClient, prefs: PrefsStore, pendingLink: Pair<String, String>? = null, onLinkHandled: () -> Unit = {}) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
 
@@ -33,10 +33,87 @@ fun SettingsScreen(api: ArbApiClient, prefs: PrefsStore) {
     var statusMsg by remember { mutableStateOf<String?>(null) }
     var testing by remember { mutableStateOf(false) }
 
+    // Remote Access: link with a one-time code from the desktop
+    var linkUrl by remember { mutableStateOf(if (prefs.serverUrl.startsWith("https://")) prefs.serverUrl else "") }
+    var linkCode by remember { mutableStateOf("") }
+    var deviceName by remember { mutableStateOf(prefs.deviceName.ifBlank { android.os.Build.MODEL ?: "Android" }) }
+    var linking by remember { mutableStateOf(false) }
+    var linked by remember { mutableStateOf(prefs.isLinkedDevice) }
+
+    LaunchedEffect(pendingLink) {
+        pendingLink?.let { (u, c) ->
+            if (u.isNotBlank()) linkUrl = u
+            linkCode = c
+            statusMsg = "Link code received — check the address and tap Link."
+            onLinkHandled()
+        }
+    }
+
     Column(
         Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(12.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
+        // Remote Access (from anywhere, through the PC's tunnel)
+        Surface(
+            color = ArbColors.Panel,
+            border = BorderStroke(1.dp, ArbColors.Green.copy(alpha = 0.5f)),
+            shape = RoundedCornerShape(10.dp),
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("REMOTE ACCESS — LINK WITH CODE", fontWeight = FontWeight.Bold, fontSize = 12.sp, color = ArbColors.Green)
+                if (linked) {
+                    Text("✓ Linked to ${prefs.serverUrl}", fontSize = 11.sp, color = ArbColors.Green, fontFamily = FontFamily.Monospace)
+                }
+                Text(
+                    "On the PC: Remote Access tab → Make link code. Scan the QR with the phone camera, or type the address and code here. Works from anywhere, not just Wi-Fi.",
+                    fontSize = 11.sp, color = ArbColors.Muted
+                )
+                OutlinedTextField(
+                    value = linkUrl, onValueChange = { linkUrl = it.trim() },
+                    label = { Text("Remote address (https://…)") }, singleLine = true, modifier = Modifier.fillMaxWidth()
+                )
+                OutlinedTextField(
+                    value = linkCode, onValueChange = { linkCode = it.uppercase() },
+                    label = { Text("Link code (ABCD-2345)") }, singleLine = true, modifier = Modifier.fillMaxWidth()
+                )
+                OutlinedTextField(
+                    value = deviceName, onValueChange = { deviceName = it },
+                    label = { Text("Name this phone") }, singleLine = true, modifier = Modifier.fillMaxWidth()
+                )
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                    Button(
+                        enabled = !linking && linkUrl.isNotBlank() && linkCode.filter { it.isLetterOrDigit() }.length == 8,
+                        modifier = Modifier.weight(1f),
+                        onClick = {
+                            scope.launch {
+                                linking = true; statusMsg = "Linking…"
+                                prefs.deviceName = deviceName
+                                runCatching { api.linkWithCode(linkUrl, linkCode, deviceName) }
+                                    .onSuccess {
+                                        serverUrl = prefs.serverUrl; apiToken = prefs.apiToken
+                                        linked = true; linkCode = ""
+                                        statusMsg = "✓ Linked as $it"
+                                        if (prefs.livePushServiceEnabled) { AlertForegroundService.stop(context); AlertForegroundService.start(context) }
+                                    }
+                                    .onFailure { statusMsg = "✗ ${it.message}" }
+                                linking = false
+                            }
+                        }
+                    ) { Text(if (linking) "Linking…" else "🔗 Link") }
+                    if (linked) {
+                        OutlinedButton(modifier = Modifier.weight(1f), onClick = {
+                            scope.launch {
+                                api.signOutDevice()
+                                apiToken = ""; linked = false
+                                statusMsg = "Signed out of Remote Access."
+                            }
+                        }) { Text("Sign out") }
+                    }
+                }
+            }
+        }
+
         // Quick Pairing JSON Card
         Surface(
             color = ArbColors.Panel,

@@ -46,6 +46,17 @@ class MainActivity : ComponentActivity() {
     ) { /* handled gracefully */ }
 
     private var requestedTab = mutableStateOf<String?>(null)
+    private var pendingLink = mutableStateOf<Pair<String, String>?>(null)
+
+    // arbscanner://link?url=https%3A%2F%2F…&code=ABCD-2345 (QR on the desktop's Remote Access page)
+    private fun readLink(intent: Intent?) {
+        val data = intent?.data ?: return
+        if (data.scheme != "arbscanner" || data.host != "link") return
+        val code = data.getQueryParameter("code").orEmpty()
+        if (code.isBlank()) return
+        pendingLink.value = data.getQueryParameter("url").orEmpty() to code
+        requestedTab.value = "settings"
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -65,10 +76,14 @@ class MainActivity : ComponentActivity() {
             AlertForegroundService.start(this)
         }
         requestedTab.value = intent?.getStringExtra("open_tab")
+        readLink(intent)
 
         setContent {
             ArbScannerTheme {
-                ArbScannerMobileApp(api = api, prefs = prefs, openTabHint = requestedTab.value)
+                ArbScannerMobileApp(
+                    api = api, prefs = prefs, openTabHint = requestedTab.value,
+                    pendingLink = pendingLink.value, onLinkHandled = { pendingLink.value = null },
+                )
             }
         }
     }
@@ -76,17 +91,25 @@ class MainActivity : ComponentActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         requestedTab.value = intent.getStringExtra("open_tab")
+        readLink(intent)
     }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun ArbScannerMobileApp(api: ArbApiClient, prefs: PrefsStore, openTabHint: String?) {
+private fun ArbScannerMobileApp(
+    api: ArbApiClient,
+    prefs: PrefsStore,
+    openTabHint: String?,
+    pendingLink: Pair<String, String>?,
+    onLinkHandled: () -> Unit,
+) {
     var activeTab by remember { mutableStateOf(NavTab.SCANNER) }
     var unreadAlerts by remember { mutableIntStateOf(0) }
 
-    LaunchedEffect(openTabHint) {
+    LaunchedEffect(openTabHint, pendingLink) {
         if (openTabHint == "alerts") activeTab = NavTab.ALERTS
+        if (openTabHint == "settings" || pendingLink != null) activeTab = NavTab.SETTINGS
     }
 
     Scaffold(
@@ -135,7 +158,7 @@ private fun ArbScannerMobileApp(api: ArbApiClient, prefs: PrefsStore, openTabHin
                 NavTab.ALERTS -> AlertsScreen(api = api, onUnreadUpdated = { unreadAlerts = it })
                 NavTab.BOTS -> RemoteControlScreen(api = api, prefs = prefs)
                 NavTab.PORTFOLIO -> PortfolioScreen(api = api, prefs = prefs)
-                NavTab.SETTINGS -> SettingsScreen(api = api, prefs = prefs)
+                NavTab.SETTINGS -> SettingsScreen(api = api, prefs = prefs, pendingLink = pendingLink, onLinkHandled = onLinkHandled)
             }
         }
     }

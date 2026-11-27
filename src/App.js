@@ -1,6 +1,6 @@
 // ─── Arb Scanner v3 — Unified Arbitrage, Alerts, Holdings & Hummingbot Suite ─
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { api, API_BASE } from './api';
+import { api, API_BASE, setApiToken } from './api';
 import { EXCHANGE_PAIRS } from './constants';
 import { C, S, Badge } from './ui';
 import ScannerTab from './components/ScannerTab';
@@ -13,6 +13,9 @@ import PortfolioTab from './components/PortfolioTab';
 import DeployModal from './components/DeployModal';
 import CrossCheckTab from './components/CrossCheckTab';
 import TickerAuditTab from './components/TickerAuditTab';
+import RpcTab from './components/RpcTab';
+import RemoteAccessTab from './components/RemoteAccessTab';
+import LoginScreen from './components/LoginScreen';
 
 const NAV = [
   ['scanner',     '📡 Scanner'],
@@ -24,6 +27,8 @@ const NAV = [
   ['tickers',     '🔤 Ticker Audit'],
   ['projections', '📈 Projections'],
   ['servers',     '☁ Servers'],
+  ['rpc',         '⛓ RPC'],
+  ['remote',      '🌐 Remote Access'],
 ];
 
 function playAlertChime() {
@@ -48,6 +53,16 @@ function playAlertChime() {
 
 export default function App() {
   const [tab, setTab] = useState('scanner');
+  // Remote session (null until known). Opened through the tunnel without a token → sign-in screen.
+  const [session, setSession] = useState(null);
+  const loadSession = useCallback(() => api('/api/remote/session').then(setSession).catch(() => setSession({ remote: false, authenticated: true })), []);
+  useEffect(() => {
+    loadSession();
+    const onAuth = () => loadSession();
+    window.addEventListener('arb-auth-required', onAuth);
+    return () => window.removeEventListener('arb-auth-required', onAuth);
+  }, [loadSession]);
+  const needsSignIn = !!(session && session.remote && !session.authenticated);
   const [activePairId, setActivePairId] = useState(EXCHANGE_PAIRS[0].id);
   const [quote, setQuote] = useState(EXCHANGE_PAIRS[0].defaultQuote);
   const [tradeSize, setTradeSize] = useState(1000);
@@ -112,13 +127,31 @@ export default function App() {
 
   // Live SSE push stream for profitable target notifications
   useEffect(() => {
-    if (typeof EventSource === 'undefined') return undefined;
-    let tok = '';
-    try { tok = localStorage.getItem('arb_api_token') || ''; } catch (_) {}
-    const url = `${API_BASE}/api/alerts/stream${tok ? `?token=${encodeURIComponent(tok)}` : ''}`;
+    if (typeof EventSource === 'undefined' || !session || needsSignIn) return undefined;
     let es;
-    try {
+    let cancelled = false;
+    (async () => {
+      let qs = '';
+      if (session.remote) {
+        // EventSource can't send headers: use a signed read-only ticket, not the token
+        let ticket = '';
+        try { ticket = sessionStorage.getItem('arb_stream_ticket') || ''; } catch (_) {}
+        if (!ticket) { try { ticket = (await api('/api/remote/ticket', { method: 'POST' })).ticket || ''; } catch (_) {} }
+        if (!ticket) return;
+        try { sessionStorage.setItem('arb_stream_ticket', ticket); } catch (_) {}
+        qs = `?ticket=${encodeURIComponent(ticket)}`;
+      } else {
+        let tok = '';
+        try { tok = localStorage.getItem('arb_api_token') || ''; } catch (_) {}
+        if (tok) qs = `?token=${encodeURIComponent(tok)}`;
+      }
+      if (cancelled) return;
+      const url = `${API_BASE}/api/alerts/stream${qs}`;
       es = new EventSource(url);
+      es.onerror = () => {
+        // a ticket expires after 12 h — drop it so the next attempt fetches a fresh one
+        if (session.remote && es.readyState === EventSource.CLOSED) { try { sessionStorage.removeItem('arb_stream_ticket'); } catch (_) {} }
+      };
       es.addEventListener('alert', (ev) => {
         try {
           const alert = JSON.parse(ev.data);
@@ -130,9 +163,9 @@ export default function App() {
           }
         } catch (_) {}
       });
-    } catch (_) {}
-    return () => { if (es) es.close(); };
-  }, []);
+    })().catch(() => {});
+    return () => { cancelled = true; if (es) es.close(); };
+  }, [session, needsSignIn]);
 
   // Auto-dismiss floating toast after 12s
   useEffect(() => {
@@ -172,6 +205,26 @@ export default function App() {
       tradeSize: al.tradeSize || tradeSize,
     });
   };
+
+  const signOut = async () => {
+    if (!window.confirm('Sign this device out?')) return;
+    try { await api('/api/remote/logout', { method: 'POST' }); } catch (_) {}
+    setApiToken('');
+    try { sessionStorage.removeItem('arb_stream_ticket'); } catch (_) {}
+    loadSession();
+  };
+
+  if (needsSignIn) {
+    return (
+      <LoginScreen session={session} onSignedIn={() => {
+        loadSession();
+        loadConfigAndHosts();
+        refreshSystemStatus();
+      }} />
+    );
+  }
+  const isViewer = session?.remote && session.device?.role === 'viewer';
+  const nav = NAV.filter(([k]) => !(isViewer && k === 'remote'));
 
   return (
     <div style={{ minHeight: '100vh', background: C.bg, color: C.text, fontFamily: "'IBM Plex Mono', monospace" }}>
@@ -255,6 +308,12 @@ export default function App() {
         </div>
 
         <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
+          {session?.remote && session.device && (
+            <span style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+              <Badge color={isViewer ? C.muted : C.cyan} title="Signed in through Remote Access">🌐 {session.device.name}{isViewer ? ' · view only' : ''}</Badge>
+              <button className="tbtn" onClick={signOut} style={{ ...S.btnMuted, padding: '2px 8px', fontSize: 9 }}>Sign out</button>
+            </span>
+          )}
           {vpnStatus && (
             <Badge color={vpnStatus.connected ? C.green : C.red} title={`Current IP: ${vpnStatus.currentIp}`}>
               {vpnStatus.connected ? 'VPN ✓' : 'VPN MISMATCH'}
@@ -288,7 +347,7 @@ export default function App() {
           </div>
 
           <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-            {NAV.map(([k, label]) => (
+            {nav.map(([k, label]) => (
               <button key={k} className="tbtn" onClick={() => setTab(k)}
                 style={{
                   ...(tab === k ? S.btn(C.blue, true) : S.btnMuted),
@@ -383,6 +442,8 @@ export default function App() {
         )}
 
         {tab === 'tickers' && <TickerAuditTab />}
+        {tab === 'rpc' && <RpcTab hosts={hosts} />}
+        {tab === 'remote' && <RemoteAccessTab />}
 
         {tab === 'projections' && (
           <ProjectionsTab

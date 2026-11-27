@@ -9,9 +9,13 @@ services:
     restart: unless-stopped
     ports:
       - "127.0.0.1:3001:3001"
+      - "127.0.0.1:3002:3002"   # Remote Access listener (sign-in required on every request)
     environment:
       - PORT=3001
       - BIND_HOST=0.0.0.0
+      - REMOTE_PORT=3002
+      - REMOTE_BIND=0.0.0.0       # inside the container; the host only publishes it on loopback
+      - REMOTE_TRUST_PROXY=1      # the tunnel container is the only thing forwarding to it
       - ARB_CONFIG=/app/server/data/config.json
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
@@ -33,3 +37,17 @@ services:
       - ${HUMMINGBOT_DIR:-./hummingbot}/conf:/home/hummingbot/conf
       - ${HUMMINGBOT_DIR:-./hummingbot}/logs:/home/hummingbot/logs
       - ${HUMMINGBOT_DIR:-./hummingbot}/data:/home/hummingbot/data
+
+  # Optional: Cloudflare tunnel for Remote Access when the app runs in Docker.
+  #   TUNNEL_TOKEN=eyJ... docker compose --profile tunnel up -d
+  # In the Cloudflare dashboard point the tunnel's public hostname at http://arb-scanner:3002
+  tunnel:
+    image: cloudflare/cloudflared:latest
+    container_name: arb_tunnel
+    profiles: ["tunnel"]
+    restart: unless-stopped
+    command: tunnel --no-autoupdate run
+    environment:
+      - TUNNEL_TOKEN=${TUNNEL_TOKEN:-}
+    depends_on:
+      - arb-scanner

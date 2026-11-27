@@ -868,5 +868,291 @@ function invokeApp(method, urlPath, body) {
     } finally { srv.close(); }
   });
 
+
+  // ─── RPC manager ──────────────────────────────────────────────────────────
+  const rpc = require('../lib/rpc');
+  const httpMod2 = require('http');
+  const { execFile: execFile2 } = require('child_process');
+  // Tiny JSON-RPC node: answers like an EVM node (chainId/blockNumber) or Solana (genesis/slot)
+  function fakeNode({ chainId = 1, head = 1000, genesis = null, delay = 0 } = {}) {
+    const srv = httpMod2.createServer((q, r) => {
+      let d = ''; q.on('data', c => { d += c; }); q.on('end', () => setTimeout(() => {
+        const { id, method } = JSON.parse(d || '{}');
+        const result = { eth_chainId: '0x' + chainId.toString(16), eth_blockNumber: '0x' + head.toString(16), getGenesisHash: genesis, getSlot: head }[method];
+        r.setHeader('content-type', 'application/json');
+        r.end(JSON.stringify(result === undefined ? { jsonrpc: '2.0', id, error: { message: 'no method' } } : { jsonrpc: '2.0', id, result }));
+      }, delay));
+    });
+    return new Promise(res => srv.listen(0, '127.0.0.1', () => res({ srv, url: `http://127.0.0.1:${srv.address().port}` })));
+  }
+
+  await test('rpc: URLs are validated and API keys masked', () => {
+    assert.strictEqual(rpc.validUrl('https://mainnet.base.org/'), 'https://mainnet.base.org');
+    assert.throws(() => rpc.validUrl('http://rpc.ankr.com/eth'), /only allowed for nodes on your own network/);
+    assert.throws(() => rpc.validUrl('wss://x.io'), /WebSocket/);
+    assert.strictEqual(rpc.validUrl('http://192.168.1.20:8545'), 'http://192.168.1.20:8545');
+    assert.strictEqual(rpc.maskUrl('https://mainnet.infura.io/v3/abcdef0123456789abcdef'), 'https://mainnet.infura.io/v3/abc…def');
+    assert.ok(!rpc.maskUrl('https://mainnet.helius-rpc.com/?api-key=1234-5678-abcd').includes('5678'));
+  });
+
+  await test('rpc: health check confirms the chain and flags endpoints that lag behind', async () => {
+    const good = await fakeNode({ chainId: 1, head: 2000 });
+    const behind = await fakeNode({ chainId: 1, head: 1990 });
+    const wrong = await fakeNode({ chainId: 8453, head: 2000 });
+    try {
+      const n = rpc.NETWORKS.find(x => x.id === 'ethereum-mainnet');
+      const t = await rpc.testUrl(n, good.url, { samples: 2 });
+      assert.ok(t.ok && t.head === 2000 && t.identityOk && t.samples === 2);
+      const w = await rpc.testUrl(n, wrong.url);
+      assert.ok(!w.ok && /Wrong chain/.test(w.error));
+      const sol = await fakeNode({ genesis: 'not-mainnet', head: 5 });
+      const s = await rpc.testUrl(rpc.NETWORKS.find(x => x.id === 'solana-mainnet-beta'), sol.url);
+      assert.ok(!s.ok && /Wrong cluster/.test(s.error));
+      sol.srv.close();
+
+      rpc.addEndpoint({ network: 'ethereum-mainnet', url: behind.url, label: 'Behind' });
+      rpc.addEndpoint({ network: 'ethereum-mainnet', url: good.url, label: 'Good' });
+      assert.throws(() => rpc.addEndpoint({ network: 'ethereum-mainnet', url: good.url }), /already/);
+      const r = await rpc.testNetwork('ethereum-mainnet', { samples: 1 });
+      const byLabel = Object.fromEntries(r.results.map(x => [x.label, x]));
+      assert.ok(byLabel.Behind.lagging && byLabel.Behind.lag === 10);
+      assert.ok(byLabel.Good.healthy);
+      assert.strictEqual(r.activeHealthy, false, 'first added endpoint became active and it lags');
+      const f = await rpc.pickFastest('ethereum-mainnet');
+      assert.strictEqual(f.activeId, byLabel.Good.id);
+      assert.ok(rpc.publicSettings().networks.find(x => x.id === 'ethereum-mainnet').lastTest);
+    } finally { good.srv.close(); behind.srv.close(); wrong.srv.close(); }
+  });
+
+  // Fake Gateway: conf folder + its HTTP API
+  function fakeGatewayDir(port) {
+    const dir = fs.mkdtempSync(path.join(TEST_DIR, 'gw-'));
+    const conf = path.join(dir, 'conf');
+    fs.mkdirSync(path.join(conf, 'chains', 'ethereum'), { recursive: true });
+    fs.writeFileSync(path.join(conf, 'server.yml'), `# Port on which to run\nport: ${port}\n`);
+    fs.writeFileSync(path.join(conf, 'apiKeys.yml'), "# keys\nhelius: ''\ninfura: ''\n");
+    fs.writeFileSync(path.join(conf, 'chains', 'ethereum.yml'), "defaultNetwork: mainnet\n# RPC provider\nrpcProvider: url\n");
+    fs.writeFileSync(path.join(conf, 'chains', 'solana.yml'), 'defaultNetwork: mainnet-beta\nrpcProvider: url\n');
+    fs.writeFileSync(path.join(conf, 'chains', 'ethereum', 'mainnet.yml'), "chainID: 1\nnodeURL: https://eth-mainnet.g.alchemy.com/public # default\nnativeCurrencySymbol: ETH\n");
+    return { dir, conf };
+  }
+  function fakeGatewayApi(port, calls) {
+    const srv = httpMod2.createServer((q, r) => {
+      let d = ''; q.on('data', c => { d += c; }); q.on('end', () => {
+        calls.push(`${q.method} ${q.url}`);
+        r.setHeader('content-type', 'application/json');
+        if (q.url === '/') return r.end('{"status":"ok"}');
+        if (q.url === '/config/update') {
+          const b = JSON.parse(d);
+          if (b.namespace === 'solana') { r.statusCode = 404; return r.end('{"message":"Namespace not found"}'); }
+          return r.end('{"message":"ok"}');
+        }
+        if (q.url.startsWith('/chains/ethereum/status')) return r.end('{"rpcUrl":"https://node.example/v3/abcdef0123456789abcdef","currentBlockNumber":2000}');
+        r.statusCode = 404; r.end('{}');
+      });
+    });
+    return new Promise(res => srv.listen(port, '127.0.0.1', () => res(srv)));
+  }
+  const freePort = () => new Promise(res => { const s = httpMod2.createServer(); s.listen(0, '127.0.0.1', () => { const p = s.address().port; s.close(() => res(p)); }); });
+
+  await test('rpc: Gateway agent uses the API when it answers and edits YAML (keeping comments) when it does not', async () => {
+    const port = await freePort();
+    const { conf } = fakeGatewayDir(port);
+    const calls = [];
+    const prevDev = process.env.DEV; process.env.DEV = 'true';
+    try {
+      const srv = await fakeGatewayApi(port, calls);
+      const ups = [
+        { namespace: 'ethereum-mainnet', path: 'nodeURL', value: 'https://a.example/x', file: 'chains/ethereum/mainnet.yml' },
+        { namespace: 'solana', path: 'rpcProvider', value: 'helius', file: 'chains/solana.yml' },
+      ];
+      const r1 = await rpc.gatewayAgent({ action: 'push', confDir: conf, updates: ups });
+      assert.ok(r1.ok && r1.api.reachable);
+      assert.deepStrictEqual(r1.results.map(x => x.via), ['api', 'file'], 'API refusal falls back to the file');
+      assert.ok(fs.readFileSync(path.join(conf, 'chains', 'solana.yml'), 'utf8').includes("rpcProvider: 'helius'"));
+      assert.ok(calls.includes('POST /config/update'));
+      srv.close();
+
+      const r2 = await rpc.gatewayAgent({ action: 'push', confDir: conf, updates: [ups[0], { namespace: 'apiKeys', path: 'chainstack', value: "k'ey12345", file: 'apiKeys.yml', create: true }] });
+      assert.ok(r2.ok && !r2.api.reachable && r2.restartNeeded);
+      const net = fs.readFileSync(path.join(conf, 'chains', 'ethereum', 'mainnet.yml'), 'utf8');
+      assert.ok(net.includes("nodeURL: 'https://a.example/x'") && net.startsWith('chainID: 1\n') && net.includes('nativeCurrencySymbol: ETH'));
+      assert.ok(fs.readFileSync(path.join(conf, 'apiKeys.yml'), 'utf8').includes("chainstack: 'k''ey12345'"), 'appended & YAML-escaped');
+
+      const rd = await rpc.gatewayAgent({ action: 'read', confDir: conf, networks: rpc.NETWORKS });
+      assert.strictEqual(rd.read.networks['ethereum-mainnet'].nodeURL, 'https://a.example/x');
+      assert.strictEqual(rd.read.chains.solana.rpcProvider, 'helius');
+      assert.strictEqual(rd.read.networks['ethereum-base'].present, false);
+      assert.strictEqual(rd.read.apiKeys.chainstack, "k'ey…345");
+    } finally { if (prevDev === undefined) delete process.env.DEV; else process.env.DEV = prevDev; }
+  });
+
+  await test('rpc: push tests the endpoint, runs the agent in the container, restarts and verifies', async () => {
+    const port = await freePort();
+    const { dir, conf } = fakeGatewayDir(port);
+    const calls = [];
+    const srv = await fakeGatewayApi(port, calls);
+    const node = await fakeNode({ chainId: 1, head: 2000 });
+    const dockerCalls = [];
+    const host = {
+      name: 'Test PC',
+      dockerRaw: (args) => {
+        dockerCalls.push(args[0]);
+        if (args[0] === 'ps') return Promise.resolve({ code: 0, stdout: 'hb_base|hummingbot/hummingbot:2.14.0|running|Up\ngateway|hummingbot/gateway:latest|running|Up 2 hours\n', stderr: '' });
+        if (args[0] === 'restart') return Promise.resolve({ code: 0, stdout: 'gateway', stderr: '' });
+        if (args[0] === 'exec') {
+          // run exactly what `docker exec gateway node -e <code> <payload>` would run
+          return new Promise(res => execFile2(process.execPath, args.slice(3), { cwd: dir, env: { ...process.env, DEV: 'true' }, timeout: 30000 }, (e, out, err) => res({ code: e ? 1 : 0, stdout: out, stderr: err })));
+        }
+        return Promise.resolve({ code: 1, stdout: '', stderr: 'unexpected' });
+      },
+    };
+    try {
+      const { updateConfig } = require('../lib/config');
+      updateConfig(c => { c.rpc = { ...rpc.settings(c), networks: {} }; });
+      const added = rpc.addEndpoint({ network: 'ethereum-mainnet', url: node.url + '/v3/abcdef0123456789abcdef', label: 'Mine' });
+      const d = { getHost: () => host, sleep: async () => {} };
+      const rec = await rpc.pushToGateway({ target: 'local', includeKeys: false }, d);
+      assert.ok(rec.ok, JSON.stringify(rec.results));
+      assert.strictEqual(rec.container, 'gateway');
+      assert.ok(rec.restarted && rec.verify['ethereum-mainnet'].ok && rec.verify['ethereum-mainnet'].block === 2000);
+      assert.ok(!JSON.stringify(rec).includes('0123456789'), 'no API key in the push record');
+      assert.deepStrictEqual(rec.results.map(x => x.namespace), ['ethereum-mainnet', 'ethereum', 'solana']);
+      assert.ok(dockerCalls.includes('restart'));
+
+      const st = await rpc.gatewayStatus('local', d);
+      assert.ok(st.running && st.networks['ethereum-mainnet'].present);
+
+      // A failing active endpoint blocks the push unless forced
+      node.srv.close();
+      updateConfig(c => { const r = rpc.settings(c); r.networks['ethereum-mainnet'].active = added.id; c.rpc = r; });
+      await assert.rejects(rpc.pushToGateway({ target: 'local' }, d), /failed its check/);
+      // A provider without a key is refused
+      updateConfig(c => { const r = rpc.settings(c); r.chainProvider.solana = 'helius'; c.rpc = r; });
+      await assert.rejects(rpc.pushToGateway({ target: 'local', force: true }, d), /no Helius API key/);
+    } finally { srv.close(); try { node.srv.close(); } catch (_) {} }
+  });
+
+  // ─── Remote access ────────────────────────────────────────────────────────
+  const remote = require('../lib/remote');
+  await test('remote: passwords hash with scrypt and TOTP matches the RFC 6238 vector (no replay)', () => {
+    const h = remote.hashPassword('correct horse battery');
+    assert.ok(h.startsWith('scrypt$') && remote.verifyPassword('correct horse battery', h) && !remote.verifyPassword('nope', h));
+    const secret = remote.base32Encode(Buffer.from('12345678901234567890'));
+    assert.strictEqual(secret, 'GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ');
+    assert.strictEqual(remote.hotp(secret, 1), '287082');
+    assert.strictEqual(remote.verifyTotp(secret, '287082', { now: 59000 }), 1);
+    assert.strictEqual(remote.verifyTotp(secret, '287082', { now: 59000, lastStep: 1 }), 0, 'same code twice is refused');
+    assert.strictEqual(remote.verifyTotp(secret, '000000', { now: 59000 }), 0);
+  });
+
+  await test('remote: tunnel listener demands a device token; link codes, roles, lockout and revoke work', async () => {
+    const port = await freePort();
+    process.env.REMOTE_PORT = String(port);
+    const { updateConfig } = require('../lib/config');
+    updateConfig(c => { c.apiToken = 'arb_legacy_static_token_123'; });
+    remote.setPassword({ next: 'tunnel-pass-2026!' });
+    remote.updateSettings({ enabled: true });
+    await remote.syncListener(app);
+    const call = (method, p, { token, body, headers = {} } = {}) => new Promise((resolve, reject) => {
+      const data = body ? JSON.stringify(body) : null;
+      const q = httpMod2.request({ host: '127.0.0.1', port, path: p, method, headers: { ...(data ? { 'content-type': 'application/json' } : {}), ...(token ? { authorization: `Bearer ${token}` } : {}), ...headers } }, r => {
+        let d = ''; r.on('data', c => { d += c; }); r.on('end', () => { let j = {}; try { j = JSON.parse(d); } catch (_) {} resolve({ status: r.statusCode, body: j, headers: r.headers }); });
+      });
+      q.on('error', reject); if (data) q.write(data); q.end();
+    });
+    try {
+      let r = await call('GET', '/api/health');
+      assert.strictEqual(r.status, 401, 'no token, even though the request comes from localhost');
+      assert.strictEqual(r.headers['x-frame-options'], 'DENY');
+      r = await call('GET', '/api/health', { headers: { 'x-api-token': 'arb_legacy_static_token_123' } });
+      assert.strictEqual(r.status, 401, 'the old static LAN token is not valid through the tunnel');
+      r = await call('GET', '/api/remote/session');
+      assert.ok(r.status === 200 && r.body.remote && !r.body.authenticated && r.body.passwordSet);
+
+      // brute force: 5 wrong passwords from one client IP lock it, others still get in
+      remote.resetLimits();
+      for (let i = 0; i < 5; i++) {
+        r = await call('POST', '/api/remote/login', { body: { password: 'wrong-guess-' + i }, headers: { 'cf-connecting-ip': '203.0.113.9' } });
+        assert.strictEqual(r.status, 401);
+      }
+      r = await call('POST', '/api/remote/login', { body: { password: 'tunnel-pass-2026!' }, headers: { 'cf-connecting-ip': '203.0.113.9' } });
+      assert.strictEqual(r.status, 429, 'locked even with the right password');
+      r = await call('POST', '/api/remote/login', { body: { password: 'tunnel-pass-2026!', deviceName: 'Laptop' }, headers: { 'cf-connecting-ip': '198.51.100.4' } });
+      assert.strictEqual(r.status, 200);
+      const admin = r.body.token;
+      const ticket = r.body.ticket;
+      assert.ok(/^arbd_/.test(admin) && r.body.device.role === 'admin' && r.body.ticket);
+      assert.ok(!JSON.stringify(remote.loadDevices()).includes(admin), 'only the hash is stored');
+
+      r = await call('GET', '/api/health', { token: admin });
+      assert.strictEqual(r.status, 200);
+      r = await call('GET', '/api/mobile/pairing', { token: admin });
+      assert.strictEqual(r.status, 403, 'pairing secrets never leave the PC');
+      r = await call('GET', `/api/health?ticket=${encodeURIComponent(ticket)}`);
+      assert.strictEqual(r.status, 401, 'stream tickets only open the alert stream');
+      const stream = await new Promise((resolve, reject) => {
+        const q = httpMod2.get({ host: '127.0.0.1', port, path: `/api/alerts/stream?ticket=${encodeURIComponent(ticket)}` }, res => { resolve(res.statusCode); res.destroy(); });
+        q.on('error', e => (e.code === 'ECONNRESET' ? null : reject(e)));
+      });
+      assert.strictEqual(stream, 200, 'ticket opens the alert stream');
+
+      // link code -> viewer device (read-only), single use
+      r = await call('POST', '/api/remote/link-code', { token: admin, body: { role: 'viewer' } });
+      assert.ok(r.status === 200 && /^[A-Z2-9]{4}-[A-Z2-9]{4}$/.test(r.body.code) && r.body.qrApp.startsWith('data:image/png'));
+      const code = r.body.code;
+      r = await call('POST', '/api/remote/link', { body: { code: code.toLowerCase().replace('-', ' '), deviceName: 'Pixel 9' } });
+      assert.ok(r.status === 200 && r.body.device.role === 'viewer');
+      const viewer = r.body.token;
+      r = await call('POST', '/api/remote/link', { body: { code } });
+      assert.strictEqual(r.status, 401, 'a code works once');
+      r = await call('GET', '/api/config', { token: viewer });
+      assert.strictEqual(r.status, 200);
+      r = await call('POST', '/api/guard/settings', { token: viewer, body: {} });
+      assert.strictEqual(r.status, 403);
+      r = await call('GET', '/api/remote/status', { token: viewer });
+      assert.strictEqual(r.status, 403);
+
+      // remote password change needs the current password
+      r = await call('POST', '/api/remote/password', { token: admin, body: { next: 'another-pass-2026' } });
+      assert.strictEqual(r.status, 401);
+
+      // revoke + idle expiry
+      const vid = remote.loadDevices().find(d => d.role === 'viewer').id;
+      r = await call('DELETE', `/api/remote/devices/${vid}`, { token: admin });
+      assert.strictEqual(r.status, 200);
+      r = await call('GET', '/api/health', { token: viewer });
+      assert.strictEqual(r.status, 401);
+      const fsx = require('fs'); const devFile = path.join(process.env.ARB_DATA_DIR, 'remote_devices.json');
+      const list = JSON.parse(fsx.readFileSync(devFile, 'utf8')); list[0].lastSeenAt = Date.now() - 31 * 86400000; fsx.writeFileSync(devFile, JSON.stringify(list));
+      r = await call('GET', '/api/health', { token: admin });
+      assert.strictEqual(r.status, 401, 'idle device expired');
+
+      // local listener still works with the LAN token, and turning remote off closes the door
+      const local = await invokeApp('GET', '/api/remote/session');
+      assert.strictEqual(local.body.remote, false);
+      remote.updateSettings({ enabled: false });
+      await remote.syncListener(app);
+      await assert.rejects(call('GET', '/api/health'), /ECONNREFUSED/);
+    } finally {
+      await remote.stopListener();
+      updateConfig(c => { c.apiToken = ''; });
+      delete process.env.REMOTE_PORT;
+    }
+  });
+
+  await test('remote: authenticator code is required once enabled', async () => {
+    remote.resetLimits();
+    const { secret } = remote.totpSetup();
+    remote.totpEnable(remote.hotp(secret, Math.floor(Date.now() / 30000)));
+    assert.throws(() => remote.login({ password: 'tunnel-pass-2026!', ip: '1.1.1.1' }), e => e.needsTotp === true);
+    const step = Math.floor(Date.now() / 30000) + 1; // next code (current one was used to enable)
+    const ok = remote.login({ password: 'tunnel-pass-2026!', totp: remote.hotp(secret, step), ip: '1.1.1.1' });
+    assert.ok(ok.token);
+    assert.throws(() => remote.login({ password: 'tunnel-pass-2026!', totp: remote.hotp(secret, step), ip: '1.1.1.1' }), /Authenticator code is wrong/);
+    remote.totpDisable();
+    remote.resetLimits();
+  });
+
   console.log(`\nCompleted: ${passed} test(s) passed.\n`);
 })();

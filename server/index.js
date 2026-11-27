@@ -22,6 +22,8 @@ const guard = require('./lib/guard');
 const tickerAudit = require('./lib/tickerAudit');
 const { guardedLaunch } = require('./lib/launcher');
 const { autoTrader } = require('./lib/autoTrader');
+const rpc = require('./lib/rpc');
+const remote = require('./lib/remote');
 
 const app = express();
 
@@ -39,6 +41,9 @@ app.use(cors((req, cb) => {
 }));
 app.use(express.json({ limit: '2mb' }));
 
+// Remote access: requests from the tunnel listener need a device token (see lib/remote.js)
+app.use(remote.gate);
+
 function tokenMatches(given, expected) {
   if (typeof given !== 'string') return false;
   const a = Buffer.from(given);
@@ -47,11 +52,17 @@ function tokenMatches(given, expected) {
 }
 
 // Optional API token guard (enabled automatically if `apiToken` is set in config.json)
+// (Remote requests were already checked by remote.gate; a linked device's token is also
+// accepted here so a browser that signed in remotely works on the LAN too.)
 app.use('/api', (req, res, next) => {
+  if (req.arbRemote) return next();
   const cfg = loadConfig();
   if (cfg.apiToken) {
-    const token = req.headers['x-api-token'] || req.query.token;
-    if (!tokenMatches(token, cfg.apiToken)) return res.status(401).json({ error: 'Unauthorized: invalid X-API-Token' });
+    const token = req.headers['x-api-token'] || req.query.token || remote.bearer(req);
+    if (!tokenMatches(token, cfg.apiToken) && !remote.deviceForToken(token)) {
+      if (req.path === '/remote/session') return res.json({ remote: false, authenticated: false, needsApiToken: true });
+      return res.status(401).json({ error: 'Unauthorized: invalid X-API-Token' });
+    }
   }
   next();
 });
@@ -601,6 +612,86 @@ app.post('/api/portfolio/accounts/:id/test', wrap(async (req, res) => {
   res.json(await portfolio.testWatchAccount(req.params.id));
 }));
 
+// ─── RPC Manager (Hummingbot Gateway) ───────────────────────────────────────
+app.get('/api/rpc', (req, res) => res.json({ ...rpc.publicSettings(), history: rpc.history().slice(0, 10) }));
+app.post('/api/rpc/settings', wrap(async (req, res) => res.json(rpc.updateSettings(req.body || {}))));
+app.post('/api/rpc/endpoints', wrap(async (req, res) => res.json({ ...rpc.addEndpoint(req.body || {}), settings: rpc.publicSettings() })));
+app.delete('/api/rpc/endpoints/:network/:id', wrap(async (req, res) => { rpc.removeEndpoint(req.params.network, req.params.id); res.json(rpc.publicSettings()); }));
+app.post('/api/rpc/active', wrap(async (req, res) => { rpc.setActive(req.body.network, req.body.id || null); res.json(rpc.publicSettings()); }));
+app.post('/api/rpc/test', wrap(async (req, res) => {
+  const { network, networks } = req.body || {};
+  res.json(network ? { [network]: await rpc.testNetwork(network) } : await rpc.testAll({ networks }));
+}));
+app.post('/api/rpc/fastest', wrap(async (req, res) => res.json({ ...(await rpc.pickFastest(req.body.network)), settings: rpc.publicSettings() })));
+app.get('/api/rpc/gateway', wrap(async (req, res) => res.json(await rpc.gatewayStatus(req.query.target || 'local'))));
+app.post('/api/rpc/gateway/import', wrap(async (req, res) => res.json({ ...(await rpc.importFromGateway(req.body.target || 'local')), settings: rpc.publicSettings() })));
+app.post('/api/rpc/gateway/push', wrap(async (req, res) => {
+  const b = req.body || {};
+  res.json(await rpc.pushToGateway({ target: b.target || 'local', networks: b.networks, includeKeys: b.includeKeys !== false, includeProviders: b.includeProviders !== false, force: !!b.force }));
+}));
+app.get('/api/rpc/history', (req, res) => res.json({ history: rpc.history() }));
+
+// ─── Remote Access (tunnel + device sign-in) ────────────────────────────────
+const deviceInfo = (req) => ({ ip: remote.clientIp(req), userAgent: req.headers['user-agent'] });
+function requireAdmin(req) {
+  if (req.arbRemote && (!req.arbDevice || req.arbDevice.role !== 'admin')) throw Object.assign(new Error('Admin device required'), { status: 403 });
+}
+
+app.get('/api/remote/session', (req, res) => {
+  const s = remote.settings();
+  if (!req.arbRemote) return res.json({ remote: false, authenticated: true, passwordSet: !!s.passwordHash });
+  const dev = remote.deviceForToken(remote.bearer(req), { ip: remote.clientIp(req) });
+  res.json({
+    remote: true, authenticated: !!dev, passwordSet: !!s.passwordHash, totpEnabled: !!s.totp.enabled,
+    device: dev ? { id: dev.id, name: dev.name, role: dev.role } : null,
+  });
+});
+app.post('/api/remote/login', wrap(async (req, res) => {
+  const out = remote.login({ ...(req.body || {}), ...deviceInfo(req) });
+  res.json({ ...out, ticket: remote.streamTicket({ id: out.device.id }) });
+}));
+app.post('/api/remote/link', wrap(async (req, res) => {
+  const out = remote.redeemLinkCode({ code: req.body.code, deviceName: req.body.deviceName, ...deviceInfo(req) });
+  res.json({ ...out, ticket: remote.streamTicket({ id: out.device.id }) });
+}));
+app.post('/api/remote/logout', wrap(async (req, res) => {
+  if (req.arbDevice) remote.revokeDevice(req.arbDevice.id, 'self');
+  res.json({ success: true });
+}));
+app.post('/api/remote/ticket', (req, res) => res.json({ ticket: req.arbDevice ? remote.streamTicket(req.arbDevice) : null }));
+
+app.get('/api/remote/status', wrap(async (req, res) => { requireAdmin(req); res.json({ ...remote.status(), viaRemote: !!req.arbRemote, thisDevice: req.arbDevice ? req.arbDevice.id : null }); }));
+app.get('/api/remote/tools', wrap(async (req, res) => { requireAdmin(req); res.json(await remote.detectTools()); }));
+app.post('/api/remote/settings', wrap(async (req, res) => {
+  requireAdmin(req);
+  remote.updateSettings(req.body || {}, { remote: !!req.arbRemote });
+  await remote.sync(app);
+  res.json(remote.status());
+}));
+app.post('/api/remote/password', wrap(async (req, res) => {
+  requireAdmin(req);
+  remote.setPassword(req.body || {}, { remote: !!req.arbRemote });
+  res.json({ success: true });
+}));
+app.post('/api/remote/totp/setup', wrap(async (req, res) => {
+  requireAdmin(req);
+  const t = remote.totpSetup();
+  res.json({ ...t, qr: await remote.qr(t.uri) });
+}));
+app.post('/api/remote/totp/enable', wrap(async (req, res) => { requireAdmin(req); remote.totpEnable(req.body.code); res.json(remote.status()); }));
+app.post('/api/remote/totp/disable', wrap(async (req, res) => { requireAdmin(req); remote.totpDisable(req.body.code, { remote: !!req.arbRemote }); res.json(remote.status()); }));
+app.post('/api/remote/link-code', wrap(async (req, res) => {
+  requireAdmin(req);
+  const c = remote.createLinkCode(req.body || {});
+  const urls = remote.linkUrls(c.code);
+  res.json({ ...c, urls, qrApp: await remote.qr(urls.app), qrWeb: urls.web ? await remote.qr(urls.web) : '' });
+}));
+app.delete('/api/remote/link-codes', wrap(async (req, res) => { requireAdmin(req); res.json({ cancelled: remote.cancelLinkCodes() }); }));
+app.delete('/api/remote/devices/:id', wrap(async (req, res) => { requireAdmin(req); remote.revokeDevice(req.params.id, req.arbRemote ? 'remote' : 'pc'); res.json(remote.status()); }));
+app.post('/api/remote/devices/revoke-all', wrap(async (req, res) => { requireAdmin(req); res.json({ revoked: remote.revokeAll(req.arbRemote ? 'remote' : 'pc') }); }));
+app.post('/api/remote/tunnel/start', wrap(async (req, res) => { requireAdmin(req); await remote.startTunnel(); res.json(remote.status()); }));
+app.post('/api/remote/tunnel/stop', wrap(async (req, res) => { requireAdmin(req); await remote.stopTunnel(); res.json(remote.status()); }));
+
 // ─── Android Mobile Pairing Helpers ─────────────────────────────────────────
 app.get('/api/mobile/pairing', (req, res) => {
   const cfg = loadConfig();
@@ -658,6 +749,10 @@ if (require.main === module) {
     console.log(`Configured hosts: local (${cfg.local.mode}) + ${cfg.servers.length} remote server(s)`);
     console.log(`Hummingbot image: ${cfg.hbImage} | Target Alerts: ${cfg.alerts.enabled ? 'ACTIVE' : 'OFF'}`);
     const loopback = ['127.0.0.1', 'localhost', '::1'].includes(BIND_HOST);
+    remote.sync(app).then(() => {
+      const st = remote.status();
+      if (st.enabled) console.log(`Remote access: ${st.listening ? `listening on ${st.bind}:${st.port}` : st.listenError} | tunnel: ${st.tunnel.mode}`);
+    }).catch(e => console.warn('Remote access failed to start:', e.message));
     if (!loopback && !cfg.apiToken) {
       console.warn('\n  WARNING: API is reachable from your network with NO API token set.');
       console.warn('  Anyone on this network can control your Hummingbot containers and SSH servers.');
@@ -670,7 +765,8 @@ if (require.main === module) {
     paperEngine.stop();
     if (alertManager.timer) clearInterval(alertManager.timer);
     closeAllSsh();
-    server.close(() => process.exit(0));
+    Promise.race([Promise.all([remote.stopTunnel(), remote.stopListener()]), new Promise(r => setTimeout(r, 3000))])
+      .finally(() => server.close(() => process.exit(0)));
   };
   process.on('SIGINT', shutdown);
   process.on('SIGTERM', shutdown);

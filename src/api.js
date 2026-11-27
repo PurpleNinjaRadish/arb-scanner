@@ -41,6 +41,10 @@ export async function api(path, { method = 'GET', body, params } = {}) {
   let data = {};
   try { data = text ? JSON.parse(text) : {}; } catch (_) { data = { raw: text }; }
   if (!res.ok) {
+    // Remote session missing or revoked: let the app show the sign-in screen
+    if (res.status === 401 && data.auth) {
+      try { window.dispatchEvent(new CustomEvent('arb-auth-required')); } catch (_) {}
+    }
     const err = new Error(data.error || `HTTP ${res.status}`);
     err.status = res.status;
     err.data = data;
